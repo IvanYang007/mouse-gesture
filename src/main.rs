@@ -4,6 +4,8 @@ use anyhow::Result;
 use log::{error, info, warn};
 use mouse_gesture::config::{ConfigFile, ConfigSnapshot};
 use mouse_gesture::input_hook::{self, HookCommand, HookEvent};
+use mouse_gesture::tray::{TrayIcon, TrayState};
+use mouse_gesture::lifecycle;
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -23,6 +25,8 @@ struct DaemonState {
     config: Option<ConfigSnapshot>,
     hook_event_rx: Option<std::sync::mpsc::Receiver<HookEvent>>,
     worker_tx: Option<std::sync::mpsc::Sender<String>>,
+    tray: Option<TrayIcon>,
+    hook_cmd_tx: Option<std::sync::mpsc::Sender<HookCommand>>,
 }
 
 fn main() {
@@ -39,6 +43,12 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    // Singleton
+    if let Err(e) = lifecycle::acquire_singleton() {
+        warn!("{}", e);
+        std::process::exit(0);
+    }
+
     // PMv2
     set_pmv2_dpi_awareness()?;
     info!("PMv2 DPI awareness enabled");
@@ -51,6 +61,18 @@ fn run() -> Result<()> {
 
     // Hidden window
     let hwnd = create_notification_window()?;
+
+    // Session notifications
+    lifecycle::register_session_notifications(hwnd)?;
+
+    // Tray
+    let tray = TrayIcon::new(hwnd)?;
+    let gesture_count = config.as_ref().map(|c| c.gestures.len()).unwrap_or(0);
+    if config.is_some() {
+        tray.update_status(&TrayState::Active { gesture_count })?;
+    } else {
+        tray.update_status(&TrayState::Disabled { reason: "No valid config".into() })?;
+    }
 
     // Worker thread
     let (worker_tx, worker_rx) = std::sync::mpsc::channel::<String>();
@@ -71,6 +93,13 @@ fn run() -> Result<()> {
         warn!("No config — interception disabled");
     }
 
+    // Config watcher thread
+    let cfg_path = config_path();
+    let cfg_cmd_tx = hook_cmd_tx.clone();
+    std::thread::Builder::new().name("config-watcher".into()).spawn(move || {
+        watch_config(cfg_path, cfg_cmd_tx);
+    })?;
+
     // Timer
     unsafe { windows::Win32::UI::WindowsAndMessaging::SetTimer(Some(hwnd), TIMER_GESTURE_ID, TIMER_GESTURE_MS, None); }
 
@@ -79,6 +108,8 @@ fn run() -> Result<()> {
         config,
         hook_event_rx: Some(hook_event_rx),
         worker_tx: Some(worker_tx),
+        tray: Some(tray),
+        hook_cmd_tx: Some(hook_cmd_tx.clone()),
     }));
     let state_ptr = Arc::into_raw(state);
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize); }
@@ -87,9 +118,15 @@ fn run() -> Result<()> {
     let code = message_pump(hwnd);
 
     // Cleanup
+    let _state = unsafe { Arc::from_raw(state_ptr) };
+    if let Ok(guard) = _state.lock() {
+        if let Some(ref tray) = guard.tray {
+            let _ = tray.remove();
+        }
+    }
     hook_cmd_tx.send(HookCommand::Shutdown).ok();
     let _ = hook_handle.join();
-    drop(unsafe { Arc::from_raw(state_ptr) });
+    lifecycle::unregister_session_notifications(hwnd);
 
     info!("Exit (code {})", code);
     Ok(())
@@ -351,7 +388,59 @@ unsafe extern "system" fn window_proc(
     match msg {
         WM_DESTROY | WM_CLOSE => { PostQuitMessage(0); LRESULT(0) }
         WM_QUERYENDSESSION => LRESULT(1),
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+        msg if msg == lifecycle::WM_WTSSESSION_CHANGE => {
+            let event = wparam.0 as usize;
+            if lifecycle::is_session_lock(event) {
+                info!("Session locked — disabling interception");
+                let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
+                if !state_ptr.is_null() {
+                    if let Ok(guard) = unsafe { &*state_ptr }.lock() {
+                        if let Some(ref tray) = guard.tray {
+                            let _ = tray.update_status(&TrayState::Disabled { reason: "Session locked".into() });
+                        }
+                        if let Some(ref tx) = guard.hook_cmd_tx {
+                            let _ = tx.send(HookCommand::SetInterception(false));
+                        }
+                    }
+                }
+            } else if lifecycle::is_session_unlock(event) {
+                info!("Session unlocked — re-enabling interception");
+                let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
+                if !state_ptr.is_null() {
+                    if let Ok(guard) = unsafe { &*state_ptr }.lock() {
+                        if let Some(ref tray) = guard.tray {
+                            let _ = tray.update_status(&TrayState::Active { gesture_count: guard.config.as_ref().map(|c| c.gestures.len()).unwrap_or(0) });
+                        }
+                        if let Some(ref tx) = guard.hook_cmd_tx {
+                            let _ = tx.send(HookCommand::SetInterception(true));
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        _ => {
+            // Handle tray callback
+            let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
+            if !state_ptr.is_null() {
+                if let Ok(guard) = unsafe { &*state_ptr }.lock() {
+                    if let Some(ref tray) = guard.tray {
+                        if msg == tray.callback_msg() {
+                            match lparam.0 as u32 {
+                                0x0205 => { // WM_RBUTTONUP on tray
+                                    info!("Tray right-click — opening config");
+                                    let path = config_path();
+                                    let _ = mouse_gesture::launch::shell_open(&path.to_string_lossy());
+                                }
+                                _ => {}
+                            }
+                            return LRESULT(0);
+                        }
+                    }
+                }
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
     }
 }
 
@@ -371,6 +460,35 @@ fn load_startup_config() -> Result<Option<ConfigSnapshot>> {
             Err(e) => { error!("Invalid config: {}. Interception disabled.", e); Ok(None) }
         },
         Err(e) => { warn!("No config at {}: {}. Interception disabled.", path.display(), e); Ok(None) }
+    }
+}
+
+/// Poll the config file periodically for changes.
+fn watch_config(path: std::path::PathBuf, cmd_tx: std::sync::mpsc::Sender<HookCommand>) {
+    use std::time::Duration;
+    let mut last_modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+    loop {
+        std::thread::sleep(Duration::from_secs(2));
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                let modified = meta.modified().ok();
+                if modified != last_modified {
+                    last_modified = modified;
+                    match ConfigFile::load(&path) {
+                        Ok(cfg) => match cfg.compile(1, 96) {
+                            Ok(snapshot) => {
+                                info!("Config reloaded: {} gestures", snapshot.gestures.len());
+                                let _ = cmd_tx.send(HookCommand::UpdateConfig(snapshot));
+                                let _ = cmd_tx.send(HookCommand::SetInterception(true));
+                            }
+                            Err(e) => warn!("Config reload failed: {}. Keeping previous.", e),
+                        },
+                        Err(e) => warn!("Config read failed: {}", e),
+                    }
+                }
+            }
+            Err(_) => {} // file removed, keep polling
+        }
     }
 }
 
