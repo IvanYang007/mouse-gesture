@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Fast, lightweight Windows mouse gesture daemon"
 
+[lib]
+name = "mouse_gesture"
+path = "src/lib.rs"
+
 [dependencies]
 windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
@@ -14,11 +18,11 @@ windows = { version = "0.62", features = [
     "Win32_System_Threading",
     "Win32_Security",
     "Win32_System_RemoteDesktop",
+    "Win32_System_SystemServices",
     "Win32_Graphics_Gdi",
     "Win32_Foundation",
-    "Win32_System_Registry",
-    "Win32_System_Console",
 ]}
+serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 log = "0.4"
 env_logger = "0.11"

@@ -4,15 +4,12 @@
 use anyhow::Result;
 use std::path::PathBuf;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Threading::{
-    CreateMutexW,
-};
+use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
-    NOTIFY_FOR_THIS_SESSION, WM_WTSSESSION_CHANGE,
-    WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
+    NOTIFY_FOR_THIS_SESSION,
 };
-use windows::Win32::System::SystemServices::ERROR_ALREADY_EXISTS;
+const ERROR_ALREADY_EXISTS: windows::Win32::Foundation::WIN32_ERROR = windows::Win32::Foundation::WIN32_ERROR(183);
 use windows::core::PCWSTR;
 
 // ── Singleton Mutex ────────────────────────────────────────────
@@ -20,22 +17,20 @@ use windows::core::PCWSTR;
 const MUTEX_NAME: &str = "Global\\MouseGestureDaemon_Singleton\0";
 
 /// Ensure only one instance of the daemon runs per user session.
-/// Returns Ok(()) if this is the first instance, Err if another
-/// instance is already running.
 pub fn acquire_singleton() -> Result<()> {
     let name: Vec<u16> = MUTEX_NAME.encode_utf16().collect();
 
     unsafe {
         let handle = CreateMutexW(
             None,
-            true, // initial owner
+            true,
             PCWSTR::from_raw(name.as_ptr()),
         );
 
         match handle {
             Ok(_) => {
                 let err = windows::Win32::Foundation::GetLastError();
-                if err.0 == ERROR_ALREADY_EXISTS.0 {
+                if err == ERROR_ALREADY_EXISTS {
                     anyhow::bail!("Another instance is already running");
                 }
                 Ok(())
@@ -48,6 +43,11 @@ pub fn acquire_singleton() -> Result<()> {
 }
 
 // ── Session Events ─────────────────────────────────────────────
+
+/// Session change notification constants from wtsapi32.h
+pub const WM_WTSSESSION_CHANGE: u32 = 0x02B1;
+pub const WTS_SESSION_LOCK: u32 = 0x7;
+pub const WTS_SESSION_UNLOCK: u32 = 0x8;
 
 /// Register for session change notifications (lock/unlock, etc.).
 pub fn register_session_notifications(hwnd: HWND) -> Result<()> {
@@ -66,12 +66,12 @@ pub fn unregister_session_notifications(hwnd: HWND) {
 
 /// Check if a WM_WTSSESSION_CHANGE message indicates a lock event.
 pub fn is_session_lock(wparam: usize) -> bool {
-    wparam == WTS_SESSION_LOCK.0 as usize
+    wparam == WTS_SESSION_LOCK as usize
 }
 
 /// Check if a WM_WTSSESSION_CHANGE message indicates an unlock event.
 pub fn is_session_unlock(wparam: usize) -> bool {
-    wparam == WTS_SESSION_UNLOCK.0 as usize
+    wparam == WTS_SESSION_UNLOCK as usize
 }
 
 // ── Logging ────────────────────────────────────────────────────
@@ -86,10 +86,6 @@ pub struct RotatingLogger {
 }
 
 impl RotatingLogger {
-    /// Create a new rotating logger.
-    /// `dir` — log directory (typically %LOCALAPPDATA%\mouse-gesture\logs)
-    /// `max_files` — maximum files to retain (default 5)
-    /// `max_size` — max bytes per file before rotation (default 1MB)
     pub fn new(dir: PathBuf, max_files: usize, max_size: u64) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
         Ok(RotatingLogger {
@@ -101,7 +97,6 @@ impl RotatingLogger {
         })
     }
 
-    /// Open the current log file for appending.
     pub fn open_current(&mut self) -> Result<()> {
         let path = self.dir.join("daemon.log");
         self.current_file = Some(
@@ -116,15 +111,12 @@ impl RotatingLogger {
         Ok(())
     }
 
-    /// Rotate logs: rename daemon.log → daemon.1.log, shift existing numbered files.
     pub fn rotate(&mut self) -> Result<()> {
         self.current_file = None;
 
-        // Remove oldest file
         let oldest = self.dir.join(format!("daemon.{}.log", self.max_files));
         let _ = std::fs::remove_file(&oldest);
 
-        // Shift numbered files
         for i in (0..self.max_files).rev() {
             let src = if i == 0 {
                 self.dir.join("daemon.log")

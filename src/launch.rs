@@ -2,18 +2,18 @@
 //! ShellExecuteExW for URLs/folders/documents, and best-effort
 //! focus-existing logic.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Threading::{
-    CreateProcessW, PROCESS_CREATION_FLAGS, CREATE_NO_WINDOW, CREATE_NEW_PROCESS_GROUP,
+    CreateProcessW, CREATE_NO_WINDOW, CREATE_NEW_PROCESS_GROUP,
     STARTUPINFOW,
 };
-use windows::Win32::UI::Shell::{ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_FLAG_NO_UI};
+use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
     ShowWindowAsync, SetForegroundWindow, FlashWindowEx, FLASHWINFO,
     FLASHW_TRAY, FLASHW_TIMERNOFG, SW_RESTORE,
 };
-use windows::core::PCWSTR;
+use windows::core::PWSTR;
 
 /// Launch an executable with optional arguments.
 pub fn launch_executable(path: &str, args: &[String]) -> Result<()> {
@@ -30,67 +30,58 @@ pub fn launch_executable(path: &str, args: &[String]) -> Result<()> {
 
     unsafe {
         CreateProcessW(
-            PCWSTR::null(),               // lpApplicationName
-            PCWSTR::from_raw(cmdline_wide.as_ptr()), // lpCommandLine
-            None,                         // lpProcessAttributes
-            None,                         // lpThreadAttributes
-            false,                        // bInheritHandles
+            None,
+            Some(PWSTR::from_raw(cmdline_wide.as_mut_ptr())),
+            None,
+            None,
+            false,
             CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
-            None,                         // lpEnvironment
-            PCWSTR::null(),               // lpCurrentDirectory
+            None,
+            None,
             &si,
             &mut pi,
-        )?;
+        ).context("CreateProcessW failed")?;
     }
 
     Ok(())
 }
 
-/// Open a URL, folder, or document via ShellExecuteExW.
+use windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD;
+
+/// Open a URL, folder, or document via ShellExecuteW.
 pub fn shell_open(path: &str) -> Result<()> {
     let path_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
     let operation: Vec<u16> = "open\0".encode_utf16().collect();
 
-    let mut sei = SHELLEXECUTEINFOW {
-        cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-        fMask: SEE_MASK_FLAG_NO_UI,
-        hwnd: HWND::default(),
-        lpVerb: PCWSTR::from_raw(operation.as_ptr()),
-        lpFile: PCWSTR::from_raw(path_wide.as_ptr()),
-        lpParameters: PCWSTR::null(),
-        lpDirectory: PCWSTR::null(),
-        nShow: 1, // SW_SHOWNORMAL
-        ..Default::default()
-    };
-
     unsafe {
-        ShellExecuteExW(&mut sei)?;
+        let _result = ShellExecuteW(
+            None,
+            windows::core::PCWSTR::from_raw(operation.as_ptr()),
+            windows::core::PCWSTR::from_raw(path_wide.as_ptr()),
+            windows::core::PCWSTR::null(),
+            windows::core::PCWSTR::null(),
+            SHOW_WINDOW_CMD(1),
+        );
     }
 
     Ok(())
 }
 
-/// Focus an existing window (best effort). Windows foreground lock
-/// may prevent SetForegroundWindow from succeeding; in that case,
-/// flash the taskbar button as a visual signal.
+/// Focus an existing window (best effort).
 pub fn focus_existing(hwnd: HWND) {
     unsafe {
-        // Restore if minimized
         ShowWindowAsync(hwnd, SW_RESTORE);
 
-        // Try to bring to foreground
-        let result = SetForegroundWindow(hwnd);
+        let _ = SetForegroundWindow(hwnd);
 
-        if result.is_err() {
-            // Foreground lock active — flash taskbar button
-            let mut fwi = FLASHWINFO {
-                cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
-                hwnd,
-                dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
-                uCount: 3,
-                dwTimeout: 0,
-            };
-            unsafe { FlashWindowEx(&mut fwi); }
-        }
+        // Flash taskbar as fallback signal
+        let mut fwi = FLASHWINFO {
+            cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+            hwnd,
+            dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
+            uCount: 3,
+            dwTimeout: 0,
+        };
+        FlashWindowEx(&mut fwi);
     }
 }

@@ -289,7 +289,7 @@ fn quantize_directions(points: &[Point]) -> Vec<Direction> {
             continue;
         }
 
-        let angle = dy.atan2(dx).to_degrees();
+        let angle = (-dy).atan2(dx).to_degrees();
         let dir = angle_to_direction(angle);
         dirs.push(dir);
     }
@@ -407,7 +407,7 @@ mod tests {
         let patterns: Vec<(String, Vec<Direction>)> = vec![
             ("down".into(), vec![Direction::S]),
         ];
-        let result = classify(&buf, &patterns, 4.0, 2);
+        let result = classify(&buf, &patterns, 4.0, 1);
         match result {
             GestureResult::NoMatch => {},
             _ => panic!("expected NoMatch"),

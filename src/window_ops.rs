@@ -4,10 +4,15 @@
 
 use anyhow::Result;
 use windows::Win32::Foundation::{HWND, RECT};
-use windows::Win32::Graphics::Gdi::MonitorFromPoint;
+use windows::Win32::Graphics::Gdi::{
+    MonitorFromPoint, GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    EnumDisplayMonitors, HMONITOR, HDC,
+};
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetMonitorInfoW, GetWindowRect, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    ShowWindowAsync, PostMessageW,
+    SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE,
+    WM_CLOSE,
 };
 
 /// A monitor descriptor used for tiling calculations.
@@ -15,8 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub struct MonitorInfo {
     pub handle: isize,
     pub name: String,
-    pub rect: RECT,       // full monitor rect (physical)
-    pub work_rect: RECT,  // working area, excludes taskbar (physical)
+    pub rect: RECT,
+    pub work_rect: RECT,
     pub dpi: u32,
     pub is_primary: bool,
 }
@@ -26,15 +31,15 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
     let mut monitors = Vec::new();
 
     unsafe {
-        let _ = windows::Win32::Graphics::Gdi::EnumDisplayMonitors(
-            None, None,
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
             Some(enum_monitors_callback),
             LPARAM(&mut monitors as *mut _ as isize),
         );
     }
 
-    // Sort left-to-right, top-to-bottom
-    monitors.sort_by(|a, b| {
+    monitors.sort_by(|a: &MonitorInfo, b: &MonitorInfo| {
         a.rect.left.cmp(&b.rect.left)
             .then(a.rect.top.cmp(&b.rect.top))
     });
@@ -42,12 +47,14 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
     Ok(monitors)
 }
 
+use windows::Win32::Foundation::LPARAM;
+
 unsafe extern "system" fn enum_monitors_callback(
-    hmonitor: windows::Win32::Graphics::Gdi::HMONITOR,
-    _hdc: windows::Win32::Graphics::Gdi::HDC,
+    hmonitor: HMONITOR,
+    _hdc: HDC,
     _rect: *mut RECT,
     lparam: LPARAM,
-) -> BOOL {
+) -> windows::core::BOOL {
     let monitors = &mut *(lparam.0 as *mut Vec<MonitorInfo>);
 
     let mut info = MONITORINFO {
@@ -55,21 +62,19 @@ unsafe extern "system" fn enum_monitors_callback(
         ..Default::default()
     };
 
-    if GetMonitorInfoW(hmonitor, &mut info).is_ok() {
+    if GetMonitorInfoW(hmonitor, &mut info).as_bool() {
         monitors.push(MonitorInfo {
             handle: hmonitor.0 as isize,
-            name: String::new(), // filled via GetMonitorInfoW with MONITORINFOEXW
+            name: String::new(),
             rect: info.rcMonitor,
             work_rect: info.rcWork,
-            dpi: 96, // filled via GetDpiForMonitor
-            is_primary: (info.dwFlags & 1) != 0, // MONITORINFOF_PRIMARY
+            dpi: 96,
+            is_primary: (info.dwFlags & 1) != 0,
         });
     }
 
-    BOOL::from(true)
+    windows::core::BOOL::from(true)
 }
-
-use windows::Win32::Foundation::{BOOL, LPARAM};
 
 /// Get the DPI of the monitor containing a window.
 pub fn window_dpi(hwnd: HWND) -> u32 {
@@ -87,21 +92,15 @@ pub fn monitor_from_point(x: i32, y: i32) -> isize {
     }
 }
 
-/// Calculate the target rect for a half-screen snap.
+/// Snap position for window tiling.
 #[derive(Debug, Clone, Copy)]
 pub enum SnapPosition {
-    Left,
-    Right,
-    Top,
-    Bottom,
-    TopLeft,
-    TopRight,
-    BottomLeft,
-    BottomRight,
+    Left, Right, Top, Bottom,
+    TopLeft, TopRight, BottomLeft, BottomRight,
     Center,
 }
 
-/// Compute the target window rect for a snap operation on the given monitor.
+/// Compute the target window rect for a snap operation.
 pub fn snap_rect(monitor: &MonitorInfo, position: SnapPosition) -> RECT {
     let work = monitor.work_rect;
     let w = work.right - work.left;
@@ -109,52 +108,36 @@ pub fn snap_rect(monitor: &MonitorInfo, position: SnapPosition) -> RECT {
 
     match position {
         SnapPosition::Left => RECT {
-            left: work.left,
-            top: work.top,
-            right: work.left + w / 2,
-            bottom: work.bottom,
+            left: work.left, top: work.top,
+            right: work.left + w / 2, bottom: work.bottom,
         },
         SnapPosition::Right => RECT {
-            left: work.left + w / 2,
-            top: work.top,
-            right: work.right,
-            bottom: work.bottom,
+            left: work.left + w / 2, top: work.top,
+            right: work.right, bottom: work.bottom,
         },
         SnapPosition::Top => RECT {
-            left: work.left,
-            top: work.top,
-            right: work.right,
-            bottom: work.top + h / 2,
+            left: work.left, top: work.top,
+            right: work.right, bottom: work.top + h / 2,
         },
         SnapPosition::Bottom => RECT {
-            left: work.left,
-            top: work.top + h / 2,
-            right: work.right,
-            bottom: work.bottom,
+            left: work.left, top: work.top + h / 2,
+            right: work.right, bottom: work.bottom,
         },
         SnapPosition::TopLeft => RECT {
-            left: work.left,
-            top: work.top,
-            right: work.left + w / 2,
-            bottom: work.top + h / 2,
+            left: work.left, top: work.top,
+            right: work.left + w / 2, bottom: work.top + h / 2,
         },
         SnapPosition::TopRight => RECT {
-            left: work.left + w / 2,
-            top: work.top,
-            right: work.right,
-            bottom: work.top + h / 2,
+            left: work.left + w / 2, top: work.top,
+            right: work.right, bottom: work.top + h / 2,
         },
         SnapPosition::BottomLeft => RECT {
-            left: work.left,
-            top: work.top + h / 2,
-            right: work.left + w / 2,
-            bottom: work.bottom,
+            left: work.left, top: work.top + h / 2,
+            right: work.left + w / 2, bottom: work.bottom,
         },
         SnapPosition::BottomRight => RECT {
-            left: work.left + w / 2,
-            top: work.top + h / 2,
-            right: work.right,
-            bottom: work.bottom,
+            left: work.left + w / 2, top: work.top + h / 2,
+            right: work.right, bottom: work.bottom,
         },
         SnapPosition::Center => {
             let cw = (w as f64 * 0.8) as i32;
@@ -169,30 +152,24 @@ pub fn snap_rect(monitor: &MonitorInfo, position: SnapPosition) -> RECT {
     }
 }
 
-/// Execute a window management command on the target HWND.
+/// Execute a window management command.
 pub fn execute_window_command(hwnd: HWND, command: &str) -> Result<()> {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        SetWindowPos, ShowWindowAsync, PostMessageW,
-        HWND_TOP, HWND_TOPMOST, HWND_NOTOPMOST,
-        SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE,
-        SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOMOVE,
-        WM_CLOSE,
-    };
-
     match command {
         "maximize" => unsafe { ShowWindowAsync(hwnd, SW_MAXIMIZE); },
         "minimize" => unsafe { ShowWindowAsync(hwnd, SW_MINIMIZE); },
         "restore" => unsafe { ShowWindowAsync(hwnd, SW_RESTORE); },
-        "close" => unsafe { PostMessageW(hwnd, WM_CLOSE, WPARAM::default(), LPARAM::default()); },
+        "close" => unsafe {
+            PostMessageW(
+                Some(hwnd),
+                WM_CLOSE,
+                windows::Win32::Foundation::WPARAM::default(),
+                windows::Win32::Foundation::LPARAM::default(),
+            );
+        },
         "toggle-always-on-top" => {
-            // TODO: track current topmost state, toggle between TOPMOST and NOTOPMOST
+            // TODO: track current topmost state
         }
-        _ => {
-            anyhow::bail!("unknown window command: {}", command);
-        }
+        _ => anyhow::bail!("unknown window command: {}", command),
     }
-
     Ok(())
 }
-
-use windows::Win32::Foundation::WPARAM;

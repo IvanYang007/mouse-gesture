@@ -60,7 +60,7 @@ impl PolicyCache {
 /// Uses EnumWindows to walk the window list. Unknown PIDs are resolved
 /// async by the worker thread and pushed via policy updates.
 pub fn prewarm_cache(snapshot: &ConfigSnapshot) -> PolicyCache {
-    let mut cache = PolicyCache::from_snapshot(snapshot);
+    let _cache = PolicyCache::from_snapshot(snapshot);
 
     // In a full implementation, EnumWindows would iterate all top-level
     // windows, extract PIDs via GetWindowThreadProcessId, resolve process
@@ -68,7 +68,7 @@ pub fn prewarm_cache(snapshot: &ConfigSnapshot) -> PolicyCache {
     // the initial cache. For the skeleton, we start with an empty cache
     // and let the worker thread resolve entries on demand.
 
-    let _ = cache; // suppress unused warning during skeleton phase
+    let _ = _cache; // suppress unused warning during skeleton phase
     PolicyCache {
         entries: HashMap::new(),
         mode: snapshot.blacklist_mode.clone(),
@@ -115,7 +115,7 @@ pub fn validate_target(
 
     unsafe {
         // Check HWND still exists
-        if !IsWindow(target_hwnd).as_bool() {
+        if !IsWindow(Some(target_hwnd)).as_bool() {
             return false;
         }
 

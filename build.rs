@@ -1,5 +1,3 @@
-use std::io::Write;
-
 /// Embed an application manifest declaring Per-Monitor V2 DPI awareness
 /// and asInvoker execution level (must not run elevated).
 fn main() {

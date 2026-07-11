@@ -7,17 +7,7 @@
 //!   3. Action worker thread — config validation, process resolution,
 //!      window actions, keyboard injection, app launching
 
-mod app_policy;
-mod config;
-mod gesture;
-mod input_hook;
-mod input_inject;
-mod launch;
-mod lifecycle;
-mod state_machine;
-mod tray;
-mod win_handles;
-mod window_ops;
+use mouse_gesture::input_hook;
 
 use anyhow::Result;
 use log::info;
@@ -35,10 +25,7 @@ fn main() -> Result<()> {
     info!("PMv2 DPI awareness enabled");
 
     // Initialize hook thread-local state with default config values
-    input_hook::init_hook_state(
-        (3.0 * 96.0 / 96.0) as i32, // activation_threshold_dip default
-        (2.0 * 96.0 / 96.0) as i32, // sample_distance_dip default
-    );
+    input_hook::init_hook_state(3, 2);
 
     // TODO: Phase 2 — spawn input hook thread
     // TODO: Phase 2 — spawn action/config worker thread
