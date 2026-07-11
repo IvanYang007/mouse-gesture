@@ -130,24 +130,22 @@ fn create_notification_window() -> Result<HWND> {
 
 fn message_pump(hwnd: HWND) -> i32 {
     loop {
-        // Pump all pending hook events before blocking on GetMessage
         let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
         if !state_ptr.is_null() {
             let state = unsafe { &*state_ptr };
             let mut pending_events = Vec::new();
-            let worker_tx = if let Ok(guard) = state.lock() {
+            let (worker_tx, config) = if let Ok(guard) = state.lock() {
                 if let Some(ref rx) = guard.hook_event_rx {
                     while let Ok(event) = rx.try_recv() {
                         pending_events.push(event);
                     }
                 }
-                guard.worker_tx.clone()
+                (guard.worker_tx.clone(), guard.config.clone())
             } else {
-                None
+                (None, None)
             };
-            // Drop lock before dispatching (avoids holding lock during SendInput)
             for event in &pending_events {
-                dispatch_hook_event(event, &worker_tx);
+                dispatch_hook_event(event, &worker_tx, &config);
             }
         }
 
@@ -164,13 +162,21 @@ fn message_pump(hwnd: HWND) -> i32 {
     }
 }
 
-fn dispatch_hook_event(event: &HookEvent, worker_tx: &Option<std::sync::mpsc::Sender<String>>) {
+fn dispatch_hook_event(
+    event: &HookEvent,
+    worker_tx: &Option<std::sync::mpsc::Sender<String>>,
+    config: &Option<ConfigSnapshot>,
+) {
     match event {
         HookEvent::GestureEnded { matched: true, gesture_name } => {
             let name = gesture_name.as_deref().unwrap_or("?");
             info!("Gesture: {}", name);
             if let Some(ref tx) = worker_tx {
                 tx.send(name.to_string()).ok();
+            }
+            // Phase 3: Execute the action
+            if let Some(ref cfg) = config {
+                execute_gesture_action(cfg, name);
             }
         }
         HookEvent::GestureEnded { matched: false, .. } => info!("Gesture: unmatched"),
@@ -179,6 +185,144 @@ fn dispatch_hook_event(event: &HookEvent, worker_tx: &Option<std::sync::mpsc::Se
         }
         HookEvent::GestureStarted { .. } | HookEvent::TrailPoint { .. } => {}
         HookEvent::Error(msg) => error!("Hook: {}", msg),
+    }
+}
+
+/// Look up a gesture by name in the config and execute its action.
+fn execute_gesture_action(config: &ConfigSnapshot, gesture_name: &str) {
+    // Try window commands
+    for (name, cmd) in &config.window_commands {
+        if name == gesture_name {
+            info!("Window action: {:?}", cmd);
+            execute_window_action(cmd);
+            return;
+        }
+    }
+    // Try keyboard shortcuts
+    if let Some(inputs) = config.key_map.get(gesture_name) {
+        info!("Keyboard action: {} inputs", inputs.len());
+        execute_keyboard_action(inputs);
+        return;
+    }
+    // Try launch actions
+    for (name, path, args) in &config.launch_actions {
+        if name == gesture_name {
+            info!("Launch action: {} {:?}", path, args);
+            execute_launch_action(path, args);
+            return;
+        }
+    }
+    warn!("Gesture '{}' has no compiled action", gesture_name);
+}
+
+use mouse_gesture::config::WindowCommand;
+
+fn execute_window_action(cmd: &WindowCommand) {
+    use mouse_gesture::window_ops::{enumerate_monitors, snap_rect, SnapPosition};
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetWindowPos, ShowWindowAsync,
+        PostMessageW, SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE, HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE};
+    use windows::Win32::UI::WindowsAndMessaging::WM_CLOSE;
+    use windows::Win32::Foundation::{WPARAM, LPARAM};
+
+    let hwnd = unsafe { GetForegroundWindow() };
+    let monitors = enumerate_monitors().unwrap_or_default();
+    let current_monitor = monitors.first();
+
+    match cmd {
+        WindowCommand::Maximize => { unsafe { ShowWindowAsync(hwnd, SW_MAXIMIZE); } }
+        WindowCommand::Minimize => { unsafe { ShowWindowAsync(hwnd, SW_MINIMIZE); } }
+        WindowCommand::Restore => { unsafe { ShowWindowAsync(hwnd, SW_RESTORE); } }
+        WindowCommand::Close => {
+            unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM::default(), LPARAM::default()); }
+        }
+        WindowCommand::SnapLeft => {
+            if let Some(m) = current_monitor {
+                let r = snap_rect(m, SnapPosition::Left);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+        WindowCommand::SnapRight => {
+            if let Some(m) = current_monitor {
+                let r = snap_rect(m, SnapPosition::Right);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+        WindowCommand::SnapTop => {
+            if let Some(m) = current_monitor {
+                let r = snap_rect(m, SnapPosition::Top);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+        WindowCommand::SnapBottom => {
+            if let Some(m) = current_monitor {
+                let r = snap_rect(m, SnapPosition::Bottom);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+        WindowCommand::SnapTopLeft => {
+            if let Some(m) = current_monitor {
+                let r = snap_rect(m, SnapPosition::TopLeft);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+        WindowCommand::SnapTopRight => {
+            if let Some(m) = current_monitor {
+                let r = snap_rect(m, SnapPosition::TopRight);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+        WindowCommand::SnapBottomLeft => {
+            if let Some(m) = current_monitor {
+                let r = snap_rect(m, SnapPosition::BottomLeft);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+        WindowCommand::SnapBottomRight => {
+            if let Some(m) = current_monitor {
+                let r = snap_rect(m, SnapPosition::BottomRight);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+        WindowCommand::Center => {
+            if let Some(m) = current_monitor {
+                let r = snap_rect(m, SnapPosition::Center);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+        WindowCommand::ToggleAlwaysOnTop => {
+            info!("ToggleAlwaysOnTop not yet implemented");
+        }
+        WindowCommand::MoveToMonitor(n) => {
+            if let Some(m) = monitors.get(*n as usize) {
+                let r = snap_rect(m, SnapPosition::Center);
+                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+            }
+        }
+    }
+}
+
+fn execute_keyboard_action(inputs: &[mouse_gesture::config::CompiledInput]) {
+    use mouse_gesture::input_inject::{check_modifier_conflict, inject_key_shortcut};
+    if let Err(e) = check_modifier_conflict(inputs) {
+        warn!("Modifier conflict: {}. Skipping keyboard action.", e);
+        return;
+    }
+    if let Err(e) = inject_key_shortcut(inputs) {
+        error!("Keyboard injection failed: {}", e);
+    }
+}
+
+fn execute_launch_action(path: &str, args: &[String]) {
+    use mouse_gesture::launch::{launch_executable, shell_open};
+    if args.is_empty() && (path.starts_with("http://") || path.starts_with("https://") || path.contains('.')) {
+        // Treat URLs and paths with extensions as shell open
+        if let Err(e) = shell_open(path) {
+            error!("Shell open failed for '{}': {}", path, e);
+        }
+    } else {
+        if let Err(e) = launch_executable(path, args) {
+            error!("Launch failed for '{}': {}", path, e);
+        }
     }
 }
 

@@ -171,3 +171,90 @@ fn gesture_ended_event_carries_match_result() {
         _ => panic!("expected GestureEnded"),
     }
 }
+
+// ── Phase 3: Action Dispatch Tests ────────────────────────────
+
+#[test]
+fn config_compiles_window_commands() {
+    let toml = r#"
+[gestures.snap_right]
+pattern = "E"
+action = { type = "window", command = "snap-right" }
+"#;
+    let config: ConfigFile = toml::from_str(toml).unwrap();
+    let snapshot = config.compile(1, 96).unwrap();
+    assert_eq!(snapshot.window_commands.len(), 1);
+    assert_eq!(snapshot.window_commands[0].0, "snap_right");
+}
+
+#[test]
+fn config_compiles_keyboard_actions() {
+    let toml = r#"
+[gestures.close_tab]
+pattern = "S E"
+action = { type = "key", combo = ["Ctrl", "W"] }
+"#;
+    let config: ConfigFile = toml::from_str(toml).unwrap();
+    let snapshot = config.compile(1, 96).unwrap();
+    assert!(snapshot.key_map.contains_key("close_tab"));
+    let inputs = &snapshot.key_map["close_tab"];
+    // Should have Ctrl down, W down, W up, Ctrl up = 4 events
+    assert_eq!(inputs.len(), 4);
+}
+
+#[test]
+fn config_compiles_launch_actions() {
+    let toml = r#"
+[gestures.open_terminal]
+pattern = "W N E"
+action = { type = "launch", path = "wt.exe" }
+"#;
+    let config: ConfigFile = toml::from_str(toml).unwrap();
+    let snapshot = config.compile(1, 96).unwrap();
+    assert_eq!(snapshot.launch_actions.len(), 1);
+    assert_eq!(snapshot.launch_actions[0].1, "wt.exe");
+}
+
+#[test]
+fn snap_rect_calculations() {
+    use mouse_gesture::window_ops::{MonitorInfo, snap_rect, SnapPosition};
+    use windows::Win32::Foundation::RECT;
+    let monitor = MonitorInfo {
+        handle: 0,
+        name: "test".into(),
+        rect: RECT { left: 0, top: 0, right: 1920, bottom: 1080 },
+        work_rect: RECT { left: 0, top: 0, right: 1920, bottom: 1040 },
+        dpi: 96,
+        is_primary: true,
+    };
+
+    let right = snap_rect(&monitor, SnapPosition::Right);
+    assert_eq!(right.left, 960);
+    assert_eq!(right.right, 1920);
+
+    let left = snap_rect(&monitor, SnapPosition::Left);
+    assert_eq!(left.left, 0);
+    assert_eq!(left.right, 960);
+
+    let top_left = snap_rect(&monitor, SnapPosition::TopLeft);
+    assert_eq!(top_left.right, 960);
+    assert_eq!(top_left.bottom, 520);
+
+    let center = snap_rect(&monitor, SnapPosition::Center);
+    assert!(center.left > 0);
+    assert!(center.right < 1920);
+}
+
+#[test]
+fn gesture_action_lookup_finds_window_command() {
+    let toml = r#"
+[gestures.maximize]
+pattern = "N E"
+action = { type = "window", command = "maximize" }
+"#;
+    let config: ConfigFile = toml::from_str(toml).unwrap();
+    let snapshot = config.compile(1, 96).unwrap();
+    // Verify the action is compiled and findable
+    let found = snapshot.window_commands.iter().any(|(name, _)| name == "maximize");
+    assert!(found);
+}
