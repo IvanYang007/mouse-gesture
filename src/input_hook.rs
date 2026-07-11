@@ -45,8 +45,8 @@ pub struct HookShared {
 
 /// Spawn the input hook thread.
 pub fn spawn_hook_thread(
-    _activation_threshold: i32,
-    _sample_distance: i32,
+    activation_threshold: i32,
+    sample_distance: i32,
 ) -> (
     thread::JoinHandle<()>,
     Arc<HookShared>,
@@ -66,6 +66,7 @@ pub fn spawn_hook_thread(
     let handle = thread::Builder::new()
         .name("mouse-hook".into())
         .spawn(move || {
+            init_hook_state(activation_threshold, sample_distance);
             let hook_proc = create_hook_proc(event_tx.clone());
             let hook = unsafe {
                 SetWindowsHookExW(
@@ -212,7 +213,7 @@ fn handle_right_down(
 
     let result = HOOK_STATE_MACHINE.with(|sm| {
         let mut sm = sm.borrow_mut();
-        sm.as_mut().unwrap().on_right_down(is_injected, is_eligible, ctx)
+        sm.as_mut().expect("HOOK_STATE_MACHINE not initialized").on_right_down(is_injected, is_eligible, ctx)
     });
 
     match result {
@@ -227,7 +228,7 @@ fn handle_right_up(
 ) -> LRESULT {
     let result = HOOK_STATE_MACHINE.with(|sm| {
         let mut sm = sm.borrow_mut();
-        sm.as_mut().unwrap().on_right_up()
+        sm.as_mut().expect("HOOK_STATE_MACHINE not initialized").on_right_up()
     });
 
     match result {
@@ -287,7 +288,7 @@ fn handle_mouse_move(
 ) -> LRESULT {
     let activated = HOOK_STATE_MACHINE.with(|sm| {
         let mut sm = sm.borrow_mut();
-        sm.as_mut().unwrap().on_move(x, y)
+        sm.as_mut().expect("HOOK_STATE_MACHINE not initialized").on_move(x, y)
     });
 
     if activated {
