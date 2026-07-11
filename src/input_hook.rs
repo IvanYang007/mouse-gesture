@@ -12,7 +12,7 @@ use std::thread;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, GetMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
-    HOOKPROC, MSG, MSLLHOOKSTRUCT,
+    HOOKPROC, MSG, MSLLHOOKSTRUCT, GetForegroundWindow,
     WH_MOUSE_LL, WM_MOUSEMOVE,
     WM_RBUTTONDOWN, WM_RBUTTONUP,
     LLMHF_INJECTED,
@@ -193,15 +193,21 @@ fn handle_right_down(
     code: i32, wparam: WPARAM, lparam: LPARAM,
     is_injected: bool, x: i32, y: i32,
 ) -> LRESULT {
-    let is_eligible = HOOK_CONFIG.with(|c| {
-        c.borrow().as_ref().map(|_cfg| true).unwrap_or(false)
-    });
+    // Resolve the window under cursor
+    let (target_hwnd, target_pid) = resolve_window_under_cursor(x, y);
+
+    // Determine eligibility
+    let is_eligible = target_pid != 0
+        && target_pid != std::process::id()
+        && HOOK_CONFIG.with(|c| c.borrow().as_ref().is_some());
+
+    let foreground_hwnd = unsafe { GetForegroundWindow() };
 
     let ctx = if is_eligible {
         Some(GestureContext {
-            target_hwnd: HWND::default(),
-            target_pid: 0,
-            foreground_hwnd: HWND::default(),
+            target_hwnd,
+            target_pid,
+            foreground_hwnd,
             start_point: POINT { x, y },
             origin_monitor: 0,
             origin_dpi: 96,
@@ -219,6 +225,20 @@ fn handle_right_down(
     match result {
         DownResult::Consumed => LRESULT(1),
         _ => unsafe { CallNextHookEx(None, code, wparam, lparam) },
+    }
+}
+
+/// Resolve HWND and PID of the window under cursor coordinates.
+fn resolve_window_under_cursor(x: i32, y: i32) -> (HWND, u32) {
+    use windows::Win32::UI::WindowsAndMessaging::{WindowFromPoint, GetWindowThreadProcessId};
+    unsafe {
+        let hwnd = WindowFromPoint(POINT { x, y });
+        if hwnd.0.is_null() {
+            return (HWND::default(), 0);
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        (hwnd, pid)
     }
 }
 

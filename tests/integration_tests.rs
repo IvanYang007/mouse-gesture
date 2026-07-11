@@ -93,3 +93,81 @@ fn native_pass_passes_through_and_resets() {
     }
     assert_eq!(sm.state, mouse_gesture::state_machine::State::Idle);
 }
+
+// ── U4: Policy Cache Tests ────────────────────────────────────
+
+#[test]
+fn policy_cache_blacklist_mode_unknown_pid_eligible() {
+    use mouse_gesture::config::BlacklistMode;
+    use std::collections::HashMap;
+    let cache = mouse_gesture::app_policy::PolicyCache {
+        entries: HashMap::new(),
+        mode: BlacklistMode::Blacklist,
+    };
+    assert!(cache.is_eligible(1234));
+}
+
+#[test]
+fn policy_cache_whitelist_mode_unknown_pid_ineligible() {
+    use mouse_gesture::config::BlacklistMode;
+    use std::collections::HashMap;
+    let cache = mouse_gesture::app_policy::PolicyCache {
+        entries: HashMap::new(),
+        mode: BlacklistMode::Whitelist,
+    };
+    assert!(!cache.is_eligible(1234));
+}
+
+#[test]
+fn policy_cache_blacklist_excluded_pid_ineligible() {
+    use mouse_gesture::app_policy::PolicyEntry;
+    use mouse_gesture::config::BlacklistMode;
+    use std::collections::HashMap;
+    let mut cache = mouse_gesture::app_policy::PolicyCache {
+        entries: HashMap::new(),
+        mode: BlacklistMode::Blacklist,
+    };
+    cache.insert(1234, "notepad.exe".into(), false);
+    assert!(!cache.is_eligible(1234));
+}
+
+// ── U4: Synthetic Replay Event Tests ──────────────────────────
+
+#[test]
+fn synthetic_replay_event_carries_coordinates() {
+    let event = mouse_gesture::input_hook::HookEvent::ReplaySyntheticClick { x: 100, y: 200 };
+    match event {
+        mouse_gesture::input_hook::HookEvent::ReplaySyntheticClick { x, y } => {
+            assert_eq!(x, 100);
+            assert_eq!(y, 200);
+        }
+        _ => panic!("expected ReplaySyntheticClick"),
+    }
+}
+
+#[test]
+fn gesture_ended_event_carries_match_result() {
+    let matched = mouse_gesture::input_hook::HookEvent::GestureEnded {
+        matched: true,
+        gesture_name: Some("maximize".into()),
+    };
+    match matched {
+        mouse_gesture::input_hook::HookEvent::GestureEnded { matched, gesture_name } => {
+            assert!(matched);
+            assert_eq!(gesture_name, Some("maximize".into()));
+        }
+        _ => panic!("expected GestureEnded"),
+    }
+
+    let unmatched = mouse_gesture::input_hook::HookEvent::GestureEnded {
+        matched: false,
+        gesture_name: None,
+    };
+    match unmatched {
+        mouse_gesture::input_hook::HookEvent::GestureEnded { matched, gesture_name } => {
+            assert!(!matched);
+            assert_eq!(gesture_name, None);
+        }
+        _ => panic!("expected GestureEnded"),
+    }
+}
