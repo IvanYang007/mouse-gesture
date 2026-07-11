@@ -115,7 +115,7 @@ pub fn validate_target(
 
     unsafe {
         // Check HWND still exists
-        if IsWindow(target_hwnd).as_bool() {
+        if !IsWindow(target_hwnd).as_bool() {
             return false;
         }
 

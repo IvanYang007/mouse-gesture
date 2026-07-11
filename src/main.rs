@@ -34,6 +34,12 @@ fn main() -> Result<()> {
 
     info!("PMv2 DPI awareness enabled");
 
+    // Initialize hook thread-local state with default config values
+    input_hook::init_hook_state(
+        (3.0 * 96.0 / 96.0) as i32, // activation_threshold_dip default
+        (2.0 * 96.0 / 96.0) as i32, // sample_distance_dip default
+    );
+
     // TODO: Phase 2 — spawn input hook thread
     // TODO: Phase 2 — spawn action/config worker thread
     // TODO: Phase 4 — create notification window, tray icon

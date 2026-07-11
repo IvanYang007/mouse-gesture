@@ -4,7 +4,7 @@
 use anyhow::Result;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NOTIFYICONDATAW, NOTIFYICONDATAW_0,
+    Shell_NotifyIconW, NOTIFYICONDATAW,
     NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NIF_ICON, NIF_MESSAGE, NIF_TIP,
 };

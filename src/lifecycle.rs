@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::path::PathBuf;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Threading::{
-    CreateMutexW, OpenMutexW, MUTEX_ALL_ACCESS,
+    CreateMutexW,
 };
 use windows::Win32::System::RemoteDesktop::{
     WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,

@@ -430,12 +430,7 @@ fn resolve_key(name: &str) -> Result<(u16, u16, bool)> {
 fn key_to_scan(vk: u16) -> u16 {
     use windows::Win32::UI::Input::KeyboardAndMouse::MapVirtualKeyW;
     use windows::Win32::UI::Input::KeyboardAndMouse::MAPVK_VK_TO_VSC;
-    // This is a best-effort fallback that returns 0 if MapVirtualKey fails.
-    // In practice, for standard keys it always succeeds.
-    // We don't call MapVirtualKeyW here to avoid the unsafe boundary in compile_key_combo;
-    // scan codes are approximate but sufficient for SendInput with VK codes.
-    // Full scan code resolution via MapVirtualKeyW happens at injection time.
-    0
+    unsafe { MapVirtualKeyW(vk as u32, MAPVK_VK_TO_VSC) as u16 }
 }
 
 // We need VK_F1 constant for F-key mapping

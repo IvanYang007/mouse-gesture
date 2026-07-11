@@ -177,7 +177,7 @@ fn create_hook_proc(
     // We use a static channel since the hook proc is an extern "system" fn
     // that can't capture closures. Instead we use a thread-local channel.
     HOOK_EVENT_TX.with(|cell| {
-        cell.set(Some(tx)).ok();
+        cell.set(Some(tx)).expect("HOOK_EVENT_TX already set");
     });
 
     Some(low_level_mouse_proc)
@@ -320,18 +320,28 @@ fn handle_right_up(
             LRESULT(1)
         }
         UpResult::GestureComplete => {
-            // Classify the gesture
-            let result = HOOK_BUFFER.with(|buf| {
-                let buf = buf.borrow();
-                let buf = buf.as_ref().unwrap();
-                HOOK_CONFIG.with(|cfg| {
-                    let cfg = cfg.borrow();
-                    let cfg = cfg.as_ref().unwrap();
-                    classify(buf, &cfg.gestures, cfg.rdp_epsilon_sq, cfg.min_gesture_length)
-                })
+            // Classify the gesture — extract data from thread-locals
+            // before nesting closures to avoid deep borrow chains.
+            let classification = HOOK_BUFFER.with(|buf_cell| {
+                // First, classify using an immutable borrow
+                let result = {
+                    let buf = buf_cell.borrow();
+                    let buf_ref = buf.as_ref().expect("HOOK_BUFFER not initialized");
+                    HOOK_CONFIG.with(|cfg_cell| {
+                        let cfg = cfg_cell.borrow();
+                        let cfg_inner = cfg.as_ref().expect("HOOK_CONFIG not initialized");
+                        classify(buf_ref, &cfg_inner.gestures, cfg_inner.rdp_epsilon_sq, cfg_inner.min_gesture_length)
+                    })
+                };
+                // Now clear the buffer with a mutable borrow (immutable borrow dropped above)
+                let mut buf = buf_cell.borrow_mut();
+                if let Some(ref mut b) = *buf {
+                    b.clear();
+                }
+                result
             });
 
-            match result {
+            match classification {
                 GestureResult::Matched { name, .. } => {
                     HOOK_EVENT_TX.with(|tx| {
                         if let Some(tx) = tx.get() {
@@ -353,14 +363,6 @@ fn handle_right_up(
                     });
                 }
             }
-
-            // Clear gesture buffer
-            HOOK_BUFFER.with(|buf| {
-                let mut buf = buf.borrow_mut();
-                if let Some(ref mut buf) = *buf {
-                    buf.clear();
-                }
-            });
 
             LRESULT(1)
         }
