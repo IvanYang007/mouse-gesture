@@ -241,7 +241,7 @@ fn process_mouse_event(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if msg == WM_RBUTTONDOWN {
         return handle_right_down(code, wparam, lparam, is_injected, x, y);
     } else if msg == WM_RBUTTONUP {
-        return handle_right_up(code, wparam, lparam);
+        return handle_right_up(code, wparam, lparam, x, y);
     } else if msg == WM_MOUSEMOVE {
         return handle_mouse_move(code, wparam, lparam, x, y);
     }
@@ -301,6 +301,7 @@ fn handle_right_down(
 
 fn handle_right_up(
     code: i32, wparam: WPARAM, lparam: LPARAM,
+    x: i32, y: i32,
 ) -> LRESULT {
     let result = HOOK_STATE_MACHINE.with(|sm| {
         let mut sm = sm.borrow_mut();
@@ -313,7 +314,7 @@ fn handle_right_up(
             // Schedule synthetic click via event channel
             HOOK_EVENT_TX.with(|tx| {
                 if let Some(tx) = tx.get() {
-                    let _ = tx.send(HookEvent::ReplaySyntheticClick { x: 0, y: 0 });
+                    let _ = tx.send(HookEvent::ReplaySyntheticClick { x, y });
                 }
             });
             // Consume the original event
