@@ -1,16 +1,16 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use log::{error, info, warn};
 use mouse_gesture::config::{ConfigFile, ConfigSnapshot};
 use mouse_gesture::input_hook::{self, HookCommand, HookEvent};
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, PeekMessageW,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
     PostQuitMessage, RegisterClassExW, TranslateMessage,
     SetWindowLongPtrW, GetWindowLongPtrW, GWLP_USERDATA,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MSG, PM_REMOVE,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MSG,
     WINDOW_EX_STYLE, WS_OVERLAPPED,
     WM_CLOSE, WM_DESTROY, WM_QUERYENDSESSION, WM_TIMER,
 };
@@ -129,40 +129,47 @@ fn create_notification_window() -> Result<HWND> {
 // ── Message Pump ───────────────────────────────────────────────
 
 fn message_pump(hwnd: HWND) -> i32 {
-    let mut msg = MSG::default();
     loop {
-        // Process hook events
+        // Pump all pending hook events before blocking on GetMessage
         let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
         if !state_ptr.is_null() {
             let state = unsafe { &*state_ptr };
-            if let Ok(guard) = state.lock() {
+            let mut pending_events = Vec::new();
+            let worker_tx = if let Ok(guard) = state.lock() {
                 if let Some(ref rx) = guard.hook_event_rx {
                     while let Ok(event) = rx.try_recv() {
-                        handle_hook_event(&guard, &event);
+                        pending_events.push(event);
                     }
                 }
+                guard.worker_tx.clone()
+            } else {
+                None
+            };
+            // Drop lock before dispatching (avoids holding lock during SendInput)
+            for event in &pending_events {
+                dispatch_hook_event(event, &worker_tx);
             }
         }
 
+        // Block on GetMessage for Windows messages
+        let mut msg = MSG::default();
         unsafe {
-            if PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
-                if msg.message == 0x0012 { return msg.wParam.0 as i32; }
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
+            let ret = GetMessageW(&mut msg, None, 0, 0);
+            if ret.0 == 0 || ret.0 == -1 {
+                return msg.wParam.0 as i32;
             }
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
         }
-
-        if msg.message == 0x0012 { return msg.wParam.0 as i32; }
-        std::thread::sleep(std::time::Duration::from_millis(1));
     }
 }
 
-fn handle_hook_event(state: &DaemonState, event: &HookEvent) {
+fn dispatch_hook_event(event: &HookEvent, worker_tx: &Option<std::sync::mpsc::Sender<String>>) {
     match event {
         HookEvent::GestureEnded { matched: true, gesture_name } => {
             let name = gesture_name.as_deref().unwrap_or("?");
             info!("Gesture: {}", name);
-            if let Some(ref tx) = state.worker_tx {
+            if let Some(ref tx) = worker_tx {
                 tx.send(name.to_string()).ok();
             }
         }
