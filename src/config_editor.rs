@@ -28,11 +28,13 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, RegisterClassExW, SendMessageW,
+    GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, PostMessageW,
+    RegisterClassExW, SendMessageW,
     SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, BM_GETCHECK,
     BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST,
     CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, EN_CHANGE, ES_AUTOHSCROLL, ES_LEFT, ES_MULTILINE,
-    ES_WANTRETURN, GWLP_USERDATA, HMENU, MB_ICONERROR, MB_OK, SM_CXSCREEN, SM_CYSCREEN,
+    ES_WANTRETURN, GWLP_USERDATA, HMENU, IDCANCEL, IDNO, IDYES, MB_ICONERROR, MB_ICONQUESTION,
+    MB_OK, MB_YESNOCANCEL, SM_CXSCREEN, SM_CYSCREEN,
     SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
     WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD, WS_EX_CLIENTEDGE,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
@@ -58,6 +60,8 @@ const ID_EDIT_ACTION: u16 = 1004;
 const ID_BTN_ADD: u16 = 1005;
 const ID_BTN_CLEAR: u16 = 1006;
 const ID_BTN_DELETE: u16 = 1007;
+const ID_BTN_SAVE: u16 = 1008;
+const ID_BTN_CANCEL: u16 = 1009;
 const ID_EDIT_THRESHOLD: u16 = 1010;
 const ID_EDIT_SAMPLE: u16 = 1011;
 const ID_EDIT_EPSILON: u16 = 1012;
@@ -337,8 +341,8 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
 
     // ── Save / Cancel buttons (bottom-right) ────────────────
 
-    let h_btn_cancel = create_button(hwnd, 2, "Cancel", 620, 565, 80, 25)?;
-    let h_btn_save = create_button(hwnd, 1, "&Save", 710, 565, 80, 25)?;
+    let h_btn_cancel = create_button(hwnd, ID_BTN_CANCEL, "Cancel", 620, 565, 80, 25)?;
+    let h_btn_save = create_button(hwnd, ID_BTN_SAVE, "&Save", 710, 565, 80, 25)?;
 
     // ── Font ────────────────────────────────────────────────
 
@@ -609,8 +613,46 @@ unsafe extern "system" fn editor_proc(
 ) -> LRESULT {
     match msg {
         WM_CLOSE => {
-            unsafe {
-                let _ = DestroyWindow(hwnd);
+            let state_ptr =
+                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
+            if !state_ptr.is_null() {
+                let state = unsafe { &mut *state_ptr };
+                if state.dirty {
+                    let title: Vec<u16> =
+                        "Unsaved Changes\0".encode_utf16().collect();
+                    let msg: Vec<u16> = "Save changes to configuration?\0"
+                        .encode_utf16()
+                        .collect();
+                    let result = unsafe {
+                        MessageBoxW(
+                            Some(hwnd),
+                            PCWSTR::from_raw(msg.as_ptr()),
+                            PCWSTR::from_raw(title.as_ptr()),
+                            MB_YESNOCANCEL | MB_ICONQUESTION,
+                        )
+                    };
+                    match result {
+                        IDYES => unsafe {
+                            handle_save(hwnd, state);
+                            let _ = DestroyWindow(hwnd);
+                        },
+                        IDNO => unsafe {
+                            let _ = DestroyWindow(hwnd);
+                        },
+                        IDCANCEL => return LRESULT(0),
+                        _ => unsafe {
+                            let _ = DestroyWindow(hwnd);
+                        },
+                    }
+                } else {
+                    unsafe {
+                        let _ = DestroyWindow(hwnd);
+                    }
+                }
+            } else {
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                }
             }
             LRESULT(0)
         }
@@ -686,10 +728,10 @@ unsafe extern "system" fn editor_proc(
 
             match cmd {
                 // ── Save / Cancel ─────────────────────────
-                1 => {
-                    // Save — placeholder (U5)
-                }
-                2 => unsafe {
+                ID_BTN_SAVE if notify == BN_CLICKED => unsafe {
+                    handle_save(hwnd, state);
+                },
+                ID_BTN_CANCEL if notify == BN_CLICKED => unsafe {
                     let _ = DestroyWindow(hwnd);
                 },
 
@@ -1233,6 +1275,9 @@ unsafe fn handle_list_selection_change(state: &mut EditorState, selected: bool, 
             state.is_adding = false;
             set_edit_text(state.h_btn_add, "&Add");
         }
+
+        // Auto-flush current form values into DocumentMut before switching
+        flush_current_form_to_doc(state);
 
         state.selected_index = Some(item as usize);
         populate_form_for_gesture(state, item as usize);
@@ -2165,4 +2210,261 @@ unsafe fn read_settings_from_ui(state: &EditorState) -> Result<()> {
         .map_err(|_| anyhow::anyhow!("Min gesture length must be a valid integer"))?;
 
     Ok(())
+}
+
+// ── Flush form to DocumentMut (auto-sync on gesture switch) ─────
+
+/// Auto-flush the current form field values into DocumentMut for the
+/// currently selected gesture. Called when switching to a different
+/// gesture in the ListView so in-memory state stays consistent.
+/// Does NOT set dirty — the incremental handlers already set it on edit.
+unsafe fn flush_current_form_to_doc(state: &mut EditorState) {
+    if state.is_adding {
+        return;
+    }
+    let Some(index) = state.selected_index else {
+        return;
+    };
+    if index >= state.gesture_names.len() {
+        return;
+    }
+
+    // The individual handlers already update DocumentMut on every
+    // EN_CHANGE/CBN_SELCHANGE, so in theory DocumentMut is in sync.
+    // We call them here as a safety net for edge cases where a
+    // notification might have been missed.
+    let saved_dirty = state.dirty;
+    handle_name_change(state);
+    handle_pattern_change(state);
+    let action_type = get_action_type_selection(state);
+    match action_type {
+        0 => handle_window_cmd_change(state),
+        1 => handle_key_combo_change(state),
+        2 => handle_launch_change(state),
+        _ => {}
+    }
+    state.dirty = saved_dirty;
+}
+
+// ── Validation ────────────────────────────────────────────────
+
+/// Validate all fields before saving. Returns the first error found.
+fn validate_form(state: &EditorState) -> Result<()> {
+    // Gesture names: non-empty and unique
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for name in &state.gesture_names {
+        if name.is_empty() {
+            return Err(anyhow::anyhow!("Gesture name cannot be empty."));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(anyhow::anyhow!("Duplicate gesture name: '{}'.", name));
+        }
+    }
+
+    // Validate patterns and actions for each gesture
+    if let Some(gestures) = state.config.get("gestures").and_then(|g| g.as_table()) {
+        for (name, value) in gestures.iter() {
+            let gesture = match value.as_table() {
+                Some(t) => t,
+                None => continue,
+            };
+
+            let pattern = gesture
+                .get("pattern")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !validate_pattern_tokens(pattern) {
+                return Err(anyhow::anyhow!(
+                    "Invalid pattern '{}' for gesture '{}'.\n\nValid direction tokens: N/S/E/W/NE/SE/SW/NW or U/D/L/R/UR/DR/DL/UL.",
+                    pattern,
+                    name
+                ));
+            }
+
+            if let Some(action) = gesture.get("action").and_then(|v| v.as_inline_table()) {
+                let action_type = action
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                match action_type {
+                    "window" => {
+                        let cmd = action
+                            .get("command")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if cmd.is_empty() || !is_valid_window_command(cmd) {
+                            return Err(anyhow::anyhow!(
+                                "Invalid window command '{}' for gesture '{}'.",
+                                cmd,
+                                name
+                            ));
+                        }
+                    }
+                    "key" => {
+                        let has_combo = action
+                            .get("combo")
+                            .and_then(|v| v.as_array())
+                            .map_or(false, |arr| !arr.is_empty());
+                        if !has_combo {
+                            return Err(anyhow::anyhow!(
+                                "Keyboard combo is empty for gesture '{}'.",
+                                name
+                            ));
+                        }
+                    }
+                    "launch" => {
+                        let path = action
+                            .get("path")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        if path.is_empty() {
+                            return Err(anyhow::anyhow!(
+                                "Launch path is empty for gesture '{}'.",
+                                name
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Validate settings thresholds are positive
+    if let Some(settings) = state.config.get("settings").and_then(|s| s.as_table()) {
+        if let Some(v) = settings
+            .get("activation_threshold_dip")
+            .and_then(|v| v.as_float())
+        {
+            if v <= 0.0 {
+                return Err(anyhow::anyhow!(
+                    "Activation threshold must be a positive number."
+                ));
+            }
+        }
+        if let Some(v) = settings
+            .get("sample_distance_dip")
+            .and_then(|v| v.as_float())
+        {
+            if v <= 0.0 {
+                return Err(anyhow::anyhow!(
+                    "Sample distance must be a positive number."
+                ));
+            }
+        }
+        if let Some(v) = settings
+            .get("rdp_epsilon_dip")
+            .and_then(|v| v.as_float())
+        {
+            if v <= 0.0 {
+                return Err(anyhow::anyhow!(
+                    "RDP epsilon must be a positive number."
+                ));
+            }
+        }
+        if let Some(v) = settings
+            .get("min_gesture_length")
+            .and_then(|v| v.as_integer())
+        {
+            if v <= 0 {
+                return Err(anyhow::anyhow!(
+                    "Min gesture length must be a positive integer."
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Check whether a window command string is a valid variant.
+fn is_valid_window_command(cmd: &str) -> bool {
+    let valid: [&str; 14] = [
+        "Maximize",
+        "Minimize",
+        "Restore",
+        "Close",
+        "SnapLeft",
+        "SnapRight",
+        "SnapTop",
+        "SnapBottom",
+        "SnapTopLeft",
+        "SnapTopRight",
+        "SnapBottomLeft",
+        "SnapBottomRight",
+        "Center",
+        "ToggleAlwaysOnTop",
+    ];
+    valid.contains(&cmd)
+}
+
+// ── Save ──────────────────────────────────────────────────────
+
+/// Save the config. Validates all fields, serializes to TOML,
+/// writes atomically, and posts a reload message.
+/// Returns true on success (dirty flag reset), false if validation
+/// or I/O fails (error shown to user).
+unsafe fn handle_save(hwnd: HWND, state: &mut EditorState) -> bool {
+    // 1. Validate settings UI fields (ensure parseable)
+    if let Err(e) = read_settings_from_ui(state) {
+        show_error(hwnd, &e.to_string());
+        return false;
+    }
+
+    // 2. Validate all gestures, patterns, actions, and settings
+    if let Err(e) = validate_form(state) {
+        show_error(hwnd, &e.to_string());
+        return false;
+    }
+
+    // 3. Serialize DocumentMut to TOML string
+    let toml_string = state.config.to_string();
+
+    // 4. Parse + compile safety net (catches inconsistencies)
+    if let Err(e) =
+        crate::config::ConfigFile::parse(&toml_string).and_then(|cfg| cfg.compile(1, 96))
+    {
+        show_error(
+            hwnd,
+            &format!(
+                "Config validation failed — this is an internal error.\n\n{}",
+                e
+            ),
+        );
+        return false;
+    }
+
+    // 5. Ensure parent directory exists
+    if let Some(parent) = state.path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            show_error(hwnd, &format!("Failed to create directory: {}", e));
+            return false;
+        }
+    }
+
+    // 6. Write to temp file, then rename (atomic on NTFS)
+    let tmp_path = state.path.with_extension("toml.tmp");
+    if let Err(e) = std::fs::write(&tmp_path, &toml_string) {
+        show_error(hwnd, &format!("Failed to write config: {}", e));
+        return false;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &state.path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        show_error(hwnd, &format!("Failed to save config: {}", e));
+        return false;
+    }
+
+    // 7. Post reload to daemon
+    let _ = PostMessageW(
+        Some(state.owner),
+        WM_APP_RELOAD_CONFIG,
+        WPARAM(0),
+        LPARAM(0),
+    );
+
+    // 8. Reset dirty flag
+    state.dirty = false;
+
+    info!("Config saved: {}", state.path.display());
+    true
 }
