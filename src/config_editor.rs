@@ -12,6 +12,7 @@ use std::mem::size_of;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use toml_edit::DocumentMut;
+use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, DeleteObject, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY, HFONT,
@@ -19,24 +20,22 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Controls::{
     InitCommonControlsEx, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, LVCF_TEXT, LVCOLUMNW,
-    LVIF_STATE, LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVN_ITEMCHANGED, LVM_DELETEALLITEMS,
-    LVM_DELETEITEM, LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW,
-    LVM_INSERTITEMW, LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMW, LVS_EX_FULLROWSELECT,
-    LVS_REPORT, LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR, NMLISTVIEW, WC_LISTVIEW,
+    LVIF_STATE, LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM,
+    LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMW, LVN_ITEMCHANGED, LVS_EX_FULLROWSELECT, LVS_REPORT,
+    LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR, NMLISTVIEW, WC_LISTVIEW,
 };
-use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, RegisterClassExW,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos,
-    SetWindowTextW, ShowWindow, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON,
-    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, CBN_SELCHANGE,
-    CBS_DROPDOWNLIST, EN_CHANGE, ES_AUTOHSCROLL, ES_LEFT, ES_MULTILINE,
+    GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, RegisterClassExW, SendMessageW,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, BM_GETCHECK,
+    BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST,
+    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, EN_CHANGE, ES_AUTOHSCROLL, ES_LEFT, ES_MULTILINE,
     ES_WANTRETURN, GWLP_USERDATA, HMENU, MB_ICONERROR, MB_OK, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE,
-    WM_COMMAND, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD,
-    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
+    SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD, WS_EX_CLIENTEDGE,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
 };
 
 const EDITOR_CLASS: &str = "MouseGestureEditor\0";
@@ -148,9 +147,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
 
     // Read config file and parse into DocumentMut
     let config_text = std::fs::read_to_string(&path).unwrap_or_default();
-    let config: DocumentMut = config_text
-        .parse()
-        .unwrap_or_else(|_| DocumentMut::new());
+    let config: DocumentMut = config_text.parse().unwrap_or_else(|_| DocumentMut::new());
 
     // Center on primary monitor
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
@@ -183,10 +180,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
 
     // ListView on the left
     let lv_style = WINDOW_STYLE(
-        WS_CHILD.0 | WS_VISIBLE.0 | WS_VSCROLL.0
-            | LVS_REPORT
-            | LVS_SINGLESEL
-            | LVS_SHOWSELALWAYS,
+        WS_CHILD.0 | WS_VISIBLE.0 | WS_VSCROLL.0 | LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
     );
     let h_listview = unsafe {
         CreateWindowExW(
@@ -208,11 +202,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
 
     // ── ListView columns ────────────────────────────────
     {
-        let col_defs = [
-            ("Name\0", 200i32),
-            ("Pattern\0", 120),
-            ("Action\0", 150),
-        ];
+        let col_defs = [("Name\0", 200i32), ("Pattern\0", 120), ("Action\0", 150)];
         for (i, (name, width)) in col_defs.iter().enumerate() {
             let wide: Vec<u16> = name.encode_utf16().collect();
             let mut col = LVCOLUMNW::default();
@@ -275,7 +265,14 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     // ── Settings panel (bottom) ─────────────────────────────
 
     // Divider line
-    create_label(hwnd, "──────────────────────────────────────", 5, 385, 530, 16)?;
+    create_label(
+        hwnd,
+        "──────────────────────────────────────",
+        5,
+        385,
+        530,
+        16,
+    )?;
     create_label(hwnd, "Settings", 5, 405, 60, 16)?;
 
     // Row 1: Threshold, Sample, Epsilon
@@ -293,8 +290,15 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     let h_edit_min_len = create_edit(hwnd, ID_EDIT_MIN_LEN, 60, 450, 50, 22)?;
 
     let h_check_debug = create_checkbox(hwnd, ID_CHECK_DEBUG, "Debug logging", 130, 450, 120, 22)?;
-    let h_check_startup =
-        create_checkbox(hwnd, ID_CHECK_STARTUP, "Start with Windows", 260, 450, 140, 22)?;
+    let h_check_startup = create_checkbox(
+        hwnd,
+        ID_CHECK_STARTUP,
+        "Start with Windows",
+        260,
+        450,
+        140,
+        22,
+    )?;
 
     // ── Blacklist section ───────────────────────────────────
 
@@ -416,11 +420,16 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     // Populate ComboBoxes
     populate_action_type_combo(h_combo_action_type);
     populate_window_cmd_combo(h_combo_window_cmd);
+    populate_blacklist_combo(h_blacklist_mode);
 
     // Populate the ListView with gestures
     unsafe {
         populate_listview(&*state_ptr);
     }
+
+    // Populate settings and blacklist from config
+    populate_settings_from_doc(unsafe { &*state_ptr });
+    populate_blacklist_from_doc(unsafe { &*state_ptr });
 
     // Initial form visibility
     unsafe {
@@ -441,10 +450,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
 /// Create a STATIC label control.
 fn create_label(parent: HWND, text: &str, x: i32, y: i32, w: i32, h: i32) -> Result<HWND> {
     let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
-    let label_wide: Vec<u16> = text
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let label_wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let style = WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0);
     unsafe {
         CreateWindowExW(
@@ -468,9 +474,8 @@ fn create_label(parent: HWND, text: &str, x: i32, y: i32, w: i32, h: i32) -> Res
 /// Create a single-line EDIT control.
 fn create_edit(parent: HWND, id: u16, x: i32, y: i32, w: i32, h: i32) -> Result<HWND> {
     let class: Vec<u16> = "EDIT\0".encode_utf16().collect();
-    let style = WINDOW_STYLE(
-        (WS_CHILD | WS_VISIBLE).0 | (ES_LEFT as u32) | (ES_AUTOHSCROLL as u32),
-    );
+    let style =
+        WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0 | (ES_LEFT as u32) | (ES_AUTOHSCROLL as u32));
     unsafe {
         CreateWindowExW(
             WS_EX_CLIENTEDGE,
@@ -493,9 +498,7 @@ fn create_edit(parent: HWND, id: u16, x: i32, y: i32, w: i32, h: i32) -> Result<
 /// Create a dropdown COMBOBOX control.
 fn create_combo(parent: HWND, id: u16, x: i32, y: i32, w: i32, h: i32) -> Result<HWND> {
     let class: Vec<u16> = "COMBOBOX\0".encode_utf16().collect();
-    let style = WINDOW_STYLE(
-        (WS_CHILD | WS_VISIBLE).0 | (CBS_DROPDOWNLIST as u32),
-    );
+    let style = WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0 | (CBS_DROPDOWNLIST as u32));
     unsafe {
         CreateWindowExW(
             WS_EX_CLIENTEDGE,
@@ -526,10 +529,7 @@ fn create_button(
     h: i32,
 ) -> Result<HWND> {
     let class: Vec<u16> = "BUTTON\0".encode_utf16().collect();
-    let label_wide: Vec<u16> = text
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let label_wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let style = WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0 | (BS_PUSHBUTTON as u32));
     unsafe {
         CreateWindowExW(
@@ -561,10 +561,7 @@ fn create_checkbox(
     h: i32,
 ) -> Result<HWND> {
     let class: Vec<u16> = "BUTTON\0".encode_utf16().collect();
-    let label_wide: Vec<u16> = text
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let label_wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
     let style = WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0 | (BS_AUTOCHECKBOX as u32));
     unsafe {
         CreateWindowExW(
@@ -648,15 +645,7 @@ unsafe extern "system" fn editor_proc(
             let lv_w = client_w * 2 / 3;
             let lv_h = client_h - 220;
             unsafe {
-                let _ = SetWindowPos(
-                    state.h_listview,
-                    None,
-                    5,
-                    5,
-                    lv_w - 10,
-                    lv_h,
-                    SWP_NOZORDER,
-                );
+                let _ = SetWindowPos(state.h_listview, None, 5, 5, lv_w - 10, lv_h, SWP_NOZORDER);
             }
 
             // Save / Cancel buttons: bottom-right
@@ -686,8 +675,7 @@ unsafe extern "system" fn editor_proc(
         }
 
         WM_COMMAND => {
-            let state_ptr =
-                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
+            let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
             if state_ptr.is_null() {
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }
@@ -747,14 +735,47 @@ unsafe extern "system" fn editor_proc(
                     handle_launch_change(state);
                 },
 
+                // ── Settings edits ────────────────────────
+                ID_EDIT_THRESHOLD if notify == EN_CHANGE => unsafe {
+                    handle_setting_change(
+                        state,
+                        "activation_threshold_dip",
+                        state.h_edit_threshold,
+                    );
+                },
+                ID_EDIT_SAMPLE if notify == EN_CHANGE => unsafe {
+                    handle_setting_change(state, "sample_distance_dip", state.h_edit_sample);
+                },
+                ID_EDIT_EPSILON if notify == EN_CHANGE => unsafe {
+                    handle_setting_change(state, "rdp_epsilon_dip", state.h_edit_epsilon);
+                },
+                ID_EDIT_MIN_LEN if notify == EN_CHANGE => unsafe {
+                    handle_setting_change(state, "min_gesture_length", state.h_edit_min_len);
+                },
+
+                // ── Checkboxes ────────────────────────────
+                ID_CHECK_DEBUG if notify == BN_CLICKED => unsafe {
+                    handle_checkbox_change(state, "debug_logging", state.h_check_debug);
+                },
+                ID_CHECK_STARTUP if notify == BN_CLICKED => unsafe {
+                    handle_checkbox_change(state, "start_with_windows", state.h_check_startup);
+                },
+
+                // ── Blacklist ─────────────────────────────
+                ID_COMBO_BLACKLIST_MODE if notify == CBN_SELCHANGE => unsafe {
+                    handle_blacklist_mode_change(state);
+                },
+                ID_EDIT_BLACKLIST_APPS if notify == EN_CHANGE => unsafe {
+                    handle_blacklist_apps_change(state);
+                },
+
                 _ => {}
             }
             LRESULT(0)
         }
 
         WM_NOTIFY => {
-            let state_ptr =
-                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
+            let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
             if state_ptr.is_null() {
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }
@@ -878,8 +899,7 @@ fn populate_listview(state: &EditorState) {
                 let action_type = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match action_type {
                     "window" => {
-                        let cmd =
-                            action.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                        let cmd = action.get("command").and_then(|v| v.as_str()).unwrap_or("");
                         format!("Window: {}", cmd)
                     }
                     "key" => {
@@ -896,8 +916,7 @@ fn populate_listview(state: &EditorState) {
                         format!("Key: {}", combo_str)
                     }
                     "launch" => {
-                        let path =
-                            action.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        let path = action.get("path").and_then(|v| v.as_str()).unwrap_or("");
                         format!("Launch: {}", path)
                     }
                     other => format!("Unknown: {}", other),
@@ -906,8 +925,7 @@ fn populate_listview(state: &EditorState) {
             .unwrap_or_else(|| "Unknown".to_string());
 
         // Column 0: Name
-        let mut name_wide: Vec<u16> =
-            name.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let mut item = LVITEMW::default();
         item.mask = LVIF_TEXT;
         item.iItem = index as i32;
@@ -923,8 +941,7 @@ fn populate_listview(state: &EditorState) {
         }
 
         // Column 1: Pattern
-        let mut pat_wide: Vec<u16> =
-            pattern.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut pat_wide: Vec<u16> = pattern.encode_utf16().chain(std::iter::once(0)).collect();
         item.iSubItem = 1;
         item.pszText = PWSTR(pat_wide.as_mut_ptr());
         unsafe {
@@ -1046,7 +1063,9 @@ unsafe fn populate_form_for_gesture(state: &EditorState, index: usize) {
     let name = &state.gesture_names[index];
 
     let gestures = state.config.get("gestures").and_then(|g| g.as_table());
-    let gesture = gestures.and_then(|t| t.get(name.as_str())).and_then(|v| v.as_table());
+    let gesture = gestures
+        .and_then(|t| t.get(name.as_str()))
+        .and_then(|v| v.as_table());
 
     let Some(gesture) = gesture else {
         return;
@@ -1208,11 +1227,7 @@ unsafe fn deselect_listview(state: &EditorState) {
 // ── ListView selection handling ───────────────────────────────
 
 /// Handle a ListView selection change.
-unsafe fn handle_list_selection_change(
-    state: &mut EditorState,
-    selected: bool,
-    item: i32,
-) {
+unsafe fn handle_list_selection_change(state: &mut EditorState, selected: bool, item: i32) {
     if selected && item >= 0 {
         if state.is_adding {
             state.is_adding = false;
@@ -1370,7 +1385,10 @@ unsafe fn update_doc_action_type(state: &mut EditorState, name: &str, action_typ
         }
         _ => return,
     }
-    gesture_table.insert("action", toml_edit::Item::Value(toml_edit::Value::InlineTable(action)));
+    gesture_table.insert(
+        "action",
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(action)),
+    );
 }
 
 // ── Name field change ─────────────────────────────────────────
@@ -1548,9 +1566,9 @@ unsafe fn handle_key_combo_change(state: &mut EditorState) {
                             let mut arr = toml_edit::Array::new();
                             for token in combo_text.split('+').map(|s| s.trim()) {
                                 if !token.is_empty() {
-                                    arr.push(toml_edit::Value::String(
-                                        toml_edit::Formatted::new(token.to_string()),
-                                    ));
+                                    arr.push(toml_edit::Value::String(toml_edit::Formatted::new(
+                                        token.to_string(),
+                                    )));
                                 }
                             }
                             action_table.insert("combo", toml_edit::Value::Array(arr));
@@ -1595,9 +1613,9 @@ unsafe fn handle_launch_change(state: &mut EditorState) {
 
                             let mut arr = toml_edit::Array::new();
                             for token in args_text.split_whitespace() {
-                                arr.push(toml_edit::Value::String(
-                                    toml_edit::Formatted::new(token.to_string()),
-                                ));
+                                arr.push(toml_edit::Value::String(toml_edit::Formatted::new(
+                                    token.to_string(),
+                                )));
                             }
                             action_table.insert("args", toml_edit::Value::Array(arr));
                         }
@@ -1670,8 +1688,7 @@ unsafe fn update_listview_row(state: &EditorState, index: usize) {
     item.mask = LVIF_TEXT;
 
     // Column 0: Name
-    let mut name_wide: Vec<u16> =
-        name.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
     item.iItem = index as i32;
     item.iSubItem = 0;
     item.pszText = PWSTR(name_wide.as_mut_ptr());
@@ -1683,8 +1700,7 @@ unsafe fn update_listview_row(state: &EditorState, index: usize) {
     );
 
     // Column 1: Pattern
-    let mut pat_wide: Vec<u16> =
-        pattern.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut pat_wide: Vec<u16> = pattern.encode_utf16().chain(std::iter::once(0)).collect();
     item.iSubItem = 1;
     item.pszText = PWSTR(pat_wide.as_mut_ptr());
     SendMessageW(
@@ -1800,8 +1816,11 @@ unsafe fn validate_and_insert_gesture(state: &mut EditorState) -> bool {
                         Some(WPARAM(0)),
                         Some(LPARAM(0)),
                     );
-                    let cmd =
-                        get_window_cmd_name(if cmd_idx.0 >= 0 { cmd_idx.0 as usize } else { 0 });
+                    let cmd = get_window_cmd_name(if cmd_idx.0 >= 0 {
+                        cmd_idx.0 as usize
+                    } else {
+                        0
+                    });
                     action.insert("type", "window".into());
                     action.insert("command", cmd.into());
                 }
@@ -1811,9 +1830,9 @@ unsafe fn validate_and_insert_gesture(state: &mut EditorState) -> bool {
                     let mut arr = toml_edit::Array::new();
                     for token in combo_text.split('+').map(|s| s.trim()) {
                         if !token.is_empty() {
-                            arr.push(toml_edit::Value::String(
-                                toml_edit::Formatted::new(token.to_string()),
-                            ));
+                            arr.push(toml_edit::Value::String(toml_edit::Formatted::new(
+                                token.to_string(),
+                            )));
                         }
                     }
                     action.insert("combo", toml_edit::Value::Array(arr));
@@ -1826,9 +1845,9 @@ unsafe fn validate_and_insert_gesture(state: &mut EditorState) -> bool {
                     let args_text = read_edit_text(state.h_edit_launch_args).unwrap_or_default();
                     let mut arr = toml_edit::Array::new();
                     for token in args_text.split_whitespace() {
-                        arr.push(toml_edit::Value::String(
-                            toml_edit::Formatted::new(token.to_string()),
-                        ));
+                        arr.push(toml_edit::Value::String(toml_edit::Formatted::new(
+                            token.to_string(),
+                        )));
                     }
                     action.insert("args", toml_edit::Value::Array(arr));
                 }
@@ -1885,13 +1904,265 @@ fn validate_pattern_tokens(pattern: &str) -> bool {
         matches!(
             upper.as_str(),
             "N" | "U"
-                | "NE" | "UR"
-                | "E" | "R"
-                | "SE" | "DR"
-                | "S" | "D"
-                | "SW" | "DL"
-                | "W" | "L"
-                | "NW" | "UL"
+                | "NE"
+                | "UR"
+                | "E"
+                | "R"
+                | "SE"
+                | "DR"
+                | "S"
+                | "D"
+                | "SW"
+                | "DL"
+                | "W"
+                | "L"
+                | "NW"
+                | "UL"
         )
     })
+}
+
+// ── Settings & blacklist population ───────────────────────────
+
+/// Populate the blacklist mode ComboBox with "Blacklist" and "Whitelist" entries.
+fn populate_blacklist_combo(combo: HWND) {
+    let modes = ["Blacklist\0", "Whitelist\0"];
+    for text in &modes {
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        unsafe {
+            SendMessageW(
+                combo,
+                CB_ADDSTRING,
+                Some(WPARAM(0)),
+                Some(LPARAM(wide.as_ptr() as isize)),
+            );
+        }
+    }
+}
+
+/// Read settings from DocumentMut and populate the settings form fields.
+fn populate_settings_from_doc(state: &EditorState) {
+    let settings = state.config.get("settings").and_then(|s| s.as_table());
+
+    let threshold = settings
+        .and_then(|s| s.get("activation_threshold_dip"))
+        .and_then(|v| v.as_float())
+        .unwrap_or(30.0);
+    let sample = settings
+        .and_then(|s| s.get("sample_distance_dip"))
+        .and_then(|v| v.as_float())
+        .unwrap_or(5.0);
+    let epsilon = settings
+        .and_then(|s| s.get("rdp_epsilon_dip"))
+        .and_then(|v| v.as_float())
+        .unwrap_or(2.0);
+    let min_len = settings
+        .and_then(|s| s.get("min_gesture_length"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(3);
+    let debug = settings
+        .and_then(|s| s.get("debug_logging"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let startup = settings
+        .and_then(|s| s.get("start_with_windows"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    unsafe {
+        set_edit_text(state.h_edit_threshold, &format!("{:.1}", threshold));
+        set_edit_text(state.h_edit_sample, &format!("{:.1}", sample));
+        set_edit_text(state.h_edit_epsilon, &format!("{:.1}", epsilon));
+        set_edit_text(state.h_edit_min_len, &min_len.to_string());
+
+        SendMessageW(
+            state.h_check_debug,
+            BM_SETCHECK,
+            Some(WPARAM(if debug { 1usize } else { 0usize })),
+            Some(LPARAM(0)),
+        );
+        SendMessageW(
+            state.h_check_startup,
+            BM_SETCHECK,
+            Some(WPARAM(if startup { 1usize } else { 0usize })),
+            Some(LPARAM(0)),
+        );
+    }
+}
+
+/// Read blacklist from DocumentMut and populate the blacklist form fields.
+fn populate_blacklist_from_doc(state: &EditorState) {
+    let blacklist = state.config.get("blacklist").and_then(|b| b.as_table());
+
+    let mode = blacklist
+        .and_then(|b| b.get("mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("blacklist");
+    let mode_idx = if mode == "whitelist" { 1usize } else { 0usize };
+
+    let apps_text = blacklist
+        .and_then(|b| b.get("apps"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>()
+                .join("\r\n")
+        })
+        .unwrap_or_default();
+
+    unsafe {
+        SendMessageW(
+            state.h_blacklist_mode,
+            CB_SETCURSEL,
+            Some(WPARAM(mode_idx)),
+            Some(LPARAM(0)),
+        );
+        set_edit_text(state.h_blacklist_apps, &apps_text);
+    }
+}
+
+// ── Settings & blacklist change handlers ──────────────────────
+
+/// Handle a settings EDIT control change: parse the text and update
+/// DocumentMut with the parsed numeric value.
+unsafe fn handle_setting_change(state: &mut EditorState, key: &str, edit: HWND) {
+    let text = match read_edit_text(edit) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        state.dirty = true;
+        return;
+    }
+
+    ensure_settings_section(&mut state.config);
+    let Some(settings) = state.config.get_mut("settings") else {
+        return;
+    };
+    let Some(table) = settings.as_table_mut() else {
+        return;
+    };
+
+    match key {
+        "min_gesture_length" => {
+            if let Ok(v) = trimmed.parse::<i64>() {
+                table.insert(key, toml_edit::value(v));
+                state.dirty = true;
+            }
+        }
+        _ => {
+            if let Ok(v) = trimmed.parse::<f64>() {
+                table.insert(key, toml_edit::value(v));
+                state.dirty = true;
+            }
+        }
+    }
+}
+
+/// Handle a checkbox toggle: read `BM_GETCHECK` and update DocumentMut.
+unsafe fn handle_checkbox_change(state: &mut EditorState, key: &str, checkbox: HWND) {
+    let checked = SendMessageW(checkbox, BM_GETCHECK, Some(WPARAM(0)), Some(LPARAM(0)));
+    let is_checked = checked.0 as u32 == 1; // BST_CHECKED = 1
+
+    ensure_settings_section(&mut state.config);
+    if let Some(settings) = state.config.get_mut("settings") {
+        if let Some(table) = settings.as_table_mut() {
+            table.insert(key, toml_edit::value(is_checked));
+        }
+    }
+    state.dirty = true;
+}
+
+/// Handle blacklist mode ComboBox selection change.
+unsafe fn handle_blacklist_mode_change(state: &mut EditorState) {
+    let sel = SendMessageW(
+        state.h_blacklist_mode,
+        CB_GETCURSEL,
+        Some(WPARAM(0)),
+        Some(LPARAM(0)),
+    );
+    let mode = if sel.0 == 1 { "whitelist" } else { "blacklist" };
+
+    ensure_blacklist_section(&mut state.config);
+    if let Some(blacklist) = state.config.get_mut("blacklist") {
+        if let Some(table) = blacklist.as_table_mut() {
+            table.insert("mode", toml_edit::value(mode));
+        }
+    }
+    state.dirty = true;
+}
+
+/// Handle blacklist apps multi-line EDIT change.
+unsafe fn handle_blacklist_apps_change(state: &mut EditorState) {
+    let text = match read_edit_text(state.h_blacklist_apps) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    let mut arr = toml_edit::Array::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            arr.push(toml_edit::Value::String(toml_edit::Formatted::new(
+                trimmed.to_string(),
+            )));
+        }
+    }
+
+    ensure_blacklist_section(&mut state.config);
+    if let Some(blacklist) = state.config.get_mut("blacklist") {
+        if let Some(table) = blacklist.as_table_mut() {
+            table.insert("apps", toml_edit::Item::Value(toml_edit::Value::Array(arr)));
+        }
+    }
+    state.dirty = true;
+}
+
+/// Ensure the `[settings]` table exists in the document.
+fn ensure_settings_section(doc: &mut DocumentMut) {
+    if doc.get("settings").is_none() {
+        doc.insert("settings", toml_edit::table());
+    }
+}
+
+/// Ensure the `[blacklist]` table exists in the document.
+fn ensure_blacklist_section(doc: &mut DocumentMut) {
+    if doc.get("blacklist").is_none() {
+        doc.insert("blacklist", toml_edit::table());
+    }
+}
+
+/// Read and validate all settings/blacklist values from the UI controls.
+/// Used before saving to ensure all numeric fields contain valid values.
+/// The individual change handlers already update DocumentMut incrementally;
+/// this function validates the final state before commit.
+unsafe fn read_settings_from_ui(state: &EditorState) -> Result<()> {
+    let threshold_text = read_edit_text(state.h_edit_threshold)?;
+    threshold_text
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| anyhow::anyhow!("Activation threshold must be a valid number"))?;
+
+    let sample_text = read_edit_text(state.h_edit_sample)?;
+    sample_text
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| anyhow::anyhow!("Sample distance must be a valid number"))?;
+
+    let epsilon_text = read_edit_text(state.h_edit_epsilon)?;
+    epsilon_text
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| anyhow::anyhow!("RDP epsilon must be a valid number"))?;
+
+    let min_len_text = read_edit_text(state.h_edit_min_len)?;
+    min_len_text
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| anyhow::anyhow!("Min gesture length must be a valid integer"))?;
+
+    Ok(())
 }
