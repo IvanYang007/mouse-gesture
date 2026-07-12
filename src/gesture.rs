@@ -111,6 +111,38 @@ impl GestureBuffer {
         self.last_sample = None;
     }
 
+    /// Add a point unconditionally, skipping spatial coalescing.
+    /// Only rejects exact duplicate coordinates. Use this for the
+    /// right-button-down point, activation-threshold crossing point,
+    /// and release point — any position that must appear in the buffer
+    /// regardless of sample distance.
+    pub fn add_force(&mut self, p: Point) -> bool {
+        // Skip exact duplicates only
+        if let Some(last) = self.last_sample {
+            if p.x == last.x && p.y == last.y {
+                return true; // duplicate suppressed, not an error
+            }
+        }
+
+        if self.len >= MAX_POINTS {
+            // Adaptive decimation: keep every 2nd point
+            let mut dst = 0;
+            for src in (0..self.len).step_by(2) {
+                self.points[dst] = self.points[src];
+                dst += 1;
+            }
+            self.len = dst;
+            if self.len >= MAX_POINTS {
+                return false;
+            }
+        }
+
+        self.points[self.len] = p;
+        self.len += 1;
+        self.last_sample = Some(p);
+        true
+    }
+
     /// Number of stored points.
     pub fn len(&self) -> usize {
         self.len

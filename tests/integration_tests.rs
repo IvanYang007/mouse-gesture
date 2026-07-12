@@ -131,17 +131,19 @@ fn policy_cache_blacklist_excluded_pid_ineligible() {
     assert!(!cache.is_eligible(1234));
 }
 
-// ── U4: Synthetic Replay Event Tests ──────────────────────────
+// ── U4: Direction Changed Event Tests ──────────────────────────
 
 #[test]
-fn synthetic_replay_event_carries_coordinates() {
-    let event = mouse_gesture::input_hook::HookEvent::ReplaySyntheticClick { x: 100, y: 200 };
+fn direction_changed_event_carries_coordinates() {
+    use mouse_gesture::config::Direction;
+    let event = mouse_gesture::input_hook::HookEvent::DirectionChanged { direction: Direction::N, x: 100, y: 200 };
     match event {
-        mouse_gesture::input_hook::HookEvent::ReplaySyntheticClick { x, y } => {
+        mouse_gesture::input_hook::HookEvent::DirectionChanged { direction, x, y } => {
+            assert_eq!(direction, Direction::N);
             assert_eq!(x, 100);
             assert_eq!(y, 200);
         }
-        _ => panic!("expected ReplaySyntheticClick"),
+        _ => panic!("expected DirectionChanged"),
     }
 }
 

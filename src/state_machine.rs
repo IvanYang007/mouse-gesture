@@ -66,6 +66,9 @@ pub struct StateMachine {
     pub activation_threshold: i32,
     /// Whether activation has occurred in the current gesture.
     pub activated: bool,
+    /// True from right-down Consumed to right-up — used by the
+    /// ForceReset watchdog to avoid cancelling valid gestures.
+    pub physical_button_down: bool,
     /// Config generation snapshot for the current gesture.
     generation: u64,
 }
@@ -77,6 +80,7 @@ impl StateMachine {
             context: None,
             activation_threshold,
             activated: false,
+            physical_button_down: false,
             generation: 0,
         }
     }
@@ -112,6 +116,7 @@ impl StateMachine {
         self.generation = ctx.config_generation;
         self.context = Some(ctx);
         self.activated = false;
+        self.physical_button_down = true;
         self.state = State::Armed;
         DownResult::Consumed
     }
@@ -177,6 +182,7 @@ impl StateMachine {
         self.state = State::Idle;
         self.context = None;
         self.activated = false;
+        self.physical_button_down = false;
     }
 
     /// The config generation for the current gesture (used to verify

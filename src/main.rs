@@ -3,7 +3,7 @@
 use anyhow::Result;
 use log::{error, info, warn, debug};
 use mouse_gesture::config::{ConfigFile, ConfigSnapshot};
-use mouse_gesture::input_hook::{self, HookCommand, HookEvent};
+use mouse_gesture::input_hook::{self, HookCommand, HookController, HookEvent};
 use mouse_gesture::tray::{TrayIcon, TrayState};
 use mouse_gesture::lifecycle;
 use mouse_gesture::overlay::OverlayWindow;
@@ -15,12 +15,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, GetWindowLongPtrW, GWLP_USERDATA,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MSG,
     WINDOW_EX_STYLE, WS_OVERLAPPED,
-    WM_CLOSE, WM_DESTROY, WM_QUERYENDSESSION, WM_TIMER,
+    WM_CLOSE, WM_DESTROY, WM_QUERYENDSESSION,
 };
 
 const WINDOW_CLASS: &str = "MouseGestureDaemon\0";
-const TIMER_GESTURE_ID: usize = 1;
-const TIMER_GESTURE_MS: u32 = 5000;
 
 #[derive(Debug, Clone)]
 enum ActionJob {
@@ -34,7 +32,7 @@ struct DaemonState {
     hook_event_rx: Option<std::sync::mpsc::Receiver<HookEvent>>,
     worker_tx: Option<std::sync::mpsc::Sender<ActionJob>>,
     tray: Option<TrayIcon>,
-    hook_cmd_tx: Option<std::sync::mpsc::Sender<HookCommand>>,
+    hook_ctrl: Option<HookController>,
     overlay: OverlayWindow,
 }
 
@@ -135,13 +133,13 @@ fn run() -> Result<()> {
         info!("Worker stopped");
     })?;
 
-    // Hook thread
-    let (hook_handle, _hook_shared, hook_cmd_tx, hook_event_rx) =
+    // Hook thread + recognition worker + replay worker
+    let (_hook_handle, _recog_handle, _replay_handle, _hook_shared, hook_ctrl, hook_event_rx) =
         input_hook::spawn_hook_thread(3, 2, hwnd.0 as isize);
 
     if let Some(ref cfg) = config {
-        hook_cmd_tx.send(HookCommand::UpdateConfig(cfg.clone()))?;
-        hook_cmd_tx.send(HookCommand::SetInterception(true))?;
+        hook_ctrl.send(HookCommand::UpdateConfig(cfg.clone())).ok();
+        hook_ctrl.send(HookCommand::SetInterception(true)).ok();
         info!("Config loaded: {} gestures active", cfg.gestures.len());
     } else {
         warn!("No config — interception disabled");
@@ -149,13 +147,10 @@ fn run() -> Result<()> {
 
     // Config watcher thread
     let cfg_path = config_path();
-    let cfg_cmd_tx = hook_cmd_tx.clone();
+    let cfg_ctrl = hook_ctrl.clone();
     std::thread::Builder::new().name("config-watcher".into()).spawn(move || {
-        watch_config(cfg_path, cfg_cmd_tx);
+        watch_config(cfg_path, cfg_ctrl);
     })?;
-
-    // Timer
-    unsafe { windows::Win32::UI::WindowsAndMessaging::SetTimer(Some(hwnd), TIMER_GESTURE_ID, TIMER_GESTURE_MS, None); }
 
     // Overlay
     let overlay = OverlayWindow::new()?;
@@ -167,7 +162,7 @@ fn run() -> Result<()> {
         hook_event_rx: Some(hook_event_rx),
         worker_tx: Some(worker_tx),
         tray: Some(tray),
-        hook_cmd_tx: Some(hook_cmd_tx.clone()),
+        hook_ctrl: Some(hook_ctrl.clone()),
         overlay,
     }));
     let state_ptr = Arc::into_raw(state);
@@ -186,8 +181,11 @@ fn run() -> Result<()> {
     if let Ok(guard) = _state.lock() {
         guard.overlay.destroy();
     }
-    hook_cmd_tx.send(HookCommand::Shutdown).ok();
-    let _ = hook_handle.join();
+    hook_ctrl.send(HookCommand::Shutdown).ok();
+    // Wait for all threads to join
+    let _ = _replay_handle.join();
+    let _ = _recog_handle.join();
+    let _ = _hook_handle.join();
     lifecycle::unregister_session_notifications(hwnd);
 
     info!("Exit (code {})", code);
@@ -251,8 +249,7 @@ fn message_pump(hwnd: HWND) -> i32 {
                         HookEvent::DirectionChanged { direction, x, y } => {
                             guard.overlay.show_direction(*direction, *x, *y);
                         }
-                        HookEvent::GestureEnded { .. } | HookEvent::GestureStarted { .. }
-                        | HookEvent::ReplaySyntheticClick { .. } => {
+                        HookEvent::GestureEnded { .. } | HookEvent::GestureStarted { .. } => {
                             guard.overlay.hide();
                         }
                         _ => {}
@@ -305,9 +302,6 @@ fn dispatch_hook_event(
             }
         }
         HookEvent::GestureEnded { matched: false, .. } => debug!("Gesture: unmatched"),
-        HookEvent::ReplaySyntheticClick { x, y } => {
-            inject_synthetic_click(*x, *y);
-        }
         HookEvent::GestureStarted { .. } | HookEvent::TrailPoint { .. }
         | HookEvent::DirectionChanged { .. } | HookEvent::PatternCaptured { .. } => {}
         HookEvent::Error(msg) => error!("Hook: {}", msg),
@@ -452,23 +446,6 @@ fn execute_launch_action(path: &str, args: &[String]) {
     }
 }
 
-fn inject_synthetic_click(x: i32, y: i32) {
-    use mouse_gesture::state_machine::SELF_TAG;
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_MOUSE, MOUSEINPUT,
-        MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-    };
-    let inputs = [
-        INPUT { r#type: INPUT_MOUSE, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-            mi: MOUSEINPUT { dx: x, dy: y, mouseData: 0, dwFlags: MOUSEEVENTF_RIGHTDOWN, time: 0, dwExtraInfo: SELF_TAG }
-        }},
-        INPUT { r#type: INPUT_MOUSE, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-            mi: MOUSEINPUT { dx: x, dy: y, mouseData: 0, dwFlags: MOUSEEVENTF_RIGHTUP, time: 0, dwExtraInfo: SELF_TAG }
-        }},
-    ];
-    unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-}
-
 // ── Window Proc ────────────────────────────────────────────────
 
 unsafe extern "system" fn window_proc(
@@ -481,41 +458,28 @@ unsafe extern "system" fn window_proc(
             let event = wparam.0 as usize;
             if lifecycle::is_session_lock(event) {
                 info!("Session locked — disabling interception");
-                let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState>;
                 if !state_ptr.is_null() {
                     if let Ok(guard) = unsafe { &*state_ptr }.lock() {
                         if let Some(ref tray) = guard.tray {
                             let _ = tray.update_status(&TrayState::Disabled { reason: "Session locked".into() });
                         }
-                        if let Some(ref tx) = guard.hook_cmd_tx {
-                            let _ = tx.send(HookCommand::ForceReset);
-                            let _ = tx.send(HookCommand::SetInterception(false));
+                        if let Some(ref ctrl) = guard.hook_ctrl {
+                            let _ = ctrl.send(HookCommand::ForceReset);
+                            let _ = ctrl.send(HookCommand::SetInterception(false));
                         }
                     }
                 }
             } else if lifecycle::is_session_unlock(event) {
                 info!("Session unlocked — re-enabling interception");
-                let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState>;
                 if !state_ptr.is_null() {
                     if let Ok(guard) = unsafe { &*state_ptr }.lock() {
                         if let Some(ref tray) = guard.tray {
                             let _ = tray.update_status(&TrayState::Active { gesture_count: guard.config.as_ref().map(|c| c.gestures.len()).unwrap_or(0) });
                         }
-                        if let Some(ref tx) = guard.hook_cmd_tx {
-                            let _ = tx.send(HookCommand::SetInterception(true));
-                        }
-                    }
-                }
-            }
-            LRESULT(0)
-        }
-        WM_TIMER => {
-            if wparam.0 == TIMER_GESTURE_ID {
-                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState>;
-                if !state_ptr.is_null() {
-                    if let Ok(guard) = unsafe { &*state_ptr }.lock() {
-                        if let Some(ref tx) = guard.hook_cmd_tx {
-                            let _ = tx.send(HookCommand::ForceReset);
+                        if let Some(ref ctrl) = guard.hook_ctrl {
+                            let _ = ctrl.send(HookCommand::SetInterception(true));
                         }
                     }
                 }
@@ -524,7 +488,7 @@ unsafe extern "system" fn window_proc(
         }
         _ => {
             // Handle tray callback
-            let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
+            let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState>;
             if !state_ptr.is_null() {
                 if let Ok(guard) = unsafe { &*state_ptr }.lock() {
                     if let Some(ref tray) = guard.tray {
@@ -567,7 +531,7 @@ fn load_startup_config() -> Result<Option<ConfigSnapshot>> {
 }
 
 /// Poll the config file periodically for changes.
-fn watch_config(path: std::path::PathBuf, cmd_tx: std::sync::mpsc::Sender<HookCommand>) {
+fn watch_config(path: std::path::PathBuf, ctrl: HookController) {
     use std::time::Duration;
     let mut last_modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
     loop {
@@ -581,8 +545,8 @@ fn watch_config(path: std::path::PathBuf, cmd_tx: std::sync::mpsc::Sender<HookCo
                         Ok(cfg) => match cfg.compile(1, 96) {
                             Ok(snapshot) => {
                                 info!("Config reloaded: {} gestures", snapshot.gestures.len());
-                                let _ = cmd_tx.send(HookCommand::UpdateConfig(snapshot));
-                                let _ = cmd_tx.send(HookCommand::SetInterception(true));
+                                let _ = ctrl.send(HookCommand::UpdateConfig(snapshot));
+                                let _ = ctrl.send(HookCommand::SetInterception(true));
                             }
                             Err(e) => warn!("Config reload failed: {}. Keeping previous.", e),
                         },
