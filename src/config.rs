@@ -172,6 +172,13 @@ pub const MAX_ACTION_QUEUE: usize = 16;
 impl ConfigFile {
     /// Parse a TOML config file.
     pub fn load(path: &Path) -> Result<Self> {
+        // Limit config file size to 1 MiB to prevent OOM on malformed/symlink files
+        const MAX_CONFIG_SIZE: u64 = 1_048_576;
+        let meta = std::fs::metadata(path)
+            .with_context(|| format!("reading config metadata from {}", path.display()))?;
+        if meta.len() > MAX_CONFIG_SIZE {
+            anyhow::bail!("config file too large ({} bytes, max {} bytes)", meta.len(), MAX_CONFIG_SIZE);
+        }
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {}", path.display()))?;
         toml::from_str(&content).context("parsing config TOML")

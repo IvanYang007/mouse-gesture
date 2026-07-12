@@ -1,11 +1,12 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use anyhow::Result;
-use log::{error, info, warn};
+use log::{error, info, warn, debug};
 use mouse_gesture::config::{ConfigFile, ConfigSnapshot};
 use mouse_gesture::input_hook::{self, HookCommand, HookEvent};
 use mouse_gesture::tray::{TrayIcon, TrayState};
 use mouse_gesture::lifecycle;
+use mouse_gesture::overlay::OverlayWindow;
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -21,12 +22,20 @@ const WINDOW_CLASS: &str = "MouseGestureDaemon\0";
 const TIMER_GESTURE_ID: usize = 1;
 const TIMER_GESTURE_MS: u32 = 5000;
 
+#[derive(Debug, Clone)]
+enum ActionJob {
+    Window { name: String, cmd: mouse_gesture::config::WindowCommand },
+    Keyboard { name: String, inputs: Vec<mouse_gesture::config::CompiledInput> },
+    Launch { name: String, path: String, args: Vec<String> },
+}
+
 struct DaemonState {
     config: Option<ConfigSnapshot>,
     hook_event_rx: Option<std::sync::mpsc::Receiver<HookEvent>>,
-    worker_tx: Option<std::sync::mpsc::Sender<String>>,
+    worker_tx: Option<std::sync::mpsc::Sender<ActionJob>>,
     tray: Option<TrayIcon>,
     hook_cmd_tx: Option<std::sync::mpsc::Sender<HookCommand>>,
+    overlay: OverlayWindow,
 }
 
 fn main() {
@@ -50,8 +59,7 @@ fn run() -> Result<()> {
     }
 
     // PMv2
-    set_pmv2_dpi_awareness()?;
-    info!("PMv2 DPI awareness enabled");
+    set_pmv2_dpi_awareness();
 
     // Config
     let config = load_startup_config()?;
@@ -75,15 +83,30 @@ fn run() -> Result<()> {
     }
 
     // Worker thread
-    let (worker_tx, worker_rx) = std::sync::mpsc::channel::<String>();
+    let (worker_tx, worker_rx) = std::sync::mpsc::channel::<ActionJob>();
     std::thread::Builder::new().name("worker".into()).spawn(move || {
-        for name in worker_rx { info!("Action: {}", name); }
+        for job in worker_rx {
+            match job {
+                ActionJob::Window { name, cmd } => {
+                    info!("Action: {} (window)", name);
+                    execute_window_action(&cmd);
+                }
+                ActionJob::Keyboard { name, inputs } => {
+                    info!("Action: {} (keyboard)", name);
+                    execute_keyboard_action(&inputs);
+                }
+                ActionJob::Launch { name, path, args } => {
+                    info!("Action: {} (launch)", name);
+                    execute_launch_action(&path, &args);
+                }
+            }
+        }
         info!("Worker stopped");
     })?;
 
     // Hook thread
     let (hook_handle, _hook_shared, hook_cmd_tx, hook_event_rx) =
-        input_hook::spawn_hook_thread(3, 2);
+        input_hook::spawn_hook_thread(3, 2, hwnd.0 as isize);
 
     if let Some(ref cfg) = config {
         hook_cmd_tx.send(HookCommand::UpdateConfig(cfg.clone()))?;
@@ -103,6 +126,10 @@ fn run() -> Result<()> {
     // Timer
     unsafe { windows::Win32::UI::WindowsAndMessaging::SetTimer(Some(hwnd), TIMER_GESTURE_ID, TIMER_GESTURE_MS, None); }
 
+    // Overlay
+    let overlay = OverlayWindow::new()?;
+    info!("Direction overlay created");
+
     // State
     let state = Arc::new(Mutex::new(DaemonState {
         config,
@@ -110,6 +137,7 @@ fn run() -> Result<()> {
         worker_tx: Some(worker_tx),
         tray: Some(tray),
         hook_cmd_tx: Some(hook_cmd_tx.clone()),
+        overlay,
     }));
     let state_ptr = Arc::into_raw(state);
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize); }
@@ -123,6 +151,9 @@ fn run() -> Result<()> {
         if let Some(ref tray) = guard.tray {
             let _ = tray.remove();
         }
+    }
+    if let Ok(guard) = _state.lock() {
+        guard.overlay.destroy();
     }
     hook_cmd_tx.send(HookCommand::Shutdown).ok();
     let _ = hook_handle.join();
@@ -183,6 +214,19 @@ fn message_pump(hwnd: HWND) -> i32 {
             };
             for event in &pending_events {
                 dispatch_hook_event(event, &worker_tx, &config);
+                // Handle overlay display
+                if let Ok(guard) = state.lock() {
+                    match event {
+                        HookEvent::DirectionChanged { direction, x, y } => {
+                            guard.overlay.show_direction(*direction, *x, *y);
+                        }
+                        HookEvent::GestureEnded { .. } | HookEvent::GestureStarted { .. }
+                        | HookEvent::ReplaySyntheticClick { .. } => {
+                            guard.overlay.hide();
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 
@@ -201,26 +245,40 @@ fn message_pump(hwnd: HWND) -> i32 {
 
 fn dispatch_hook_event(
     event: &HookEvent,
-    worker_tx: &Option<std::sync::mpsc::Sender<String>>,
+    worker_tx: &Option<std::sync::mpsc::Sender<ActionJob>>,
     config: &Option<ConfigSnapshot>,
 ) {
     match event {
         HookEvent::GestureEnded { matched: true, gesture_name } => {
             let name = gesture_name.as_deref().unwrap_or("?");
-            info!("Gesture: {}", name);
-            if let Some(ref tx) = worker_tx {
-                tx.send(name.to_string()).ok();
-            }
-            // Phase 3: Execute the action
-            if let Some(ref cfg) = config {
-                execute_gesture_action(cfg, name);
+            debug!("Gesture: {}", name);
+            // Enqueue action to worker thread
+            if let (Some(ref cfg), Some(ref tx)) = (config, worker_tx) {
+                for (gesture_name, cmd) in &cfg.window_commands {
+                    if gesture_name == name {
+                        tx.send(ActionJob::Window { name: name.to_string(), cmd: cmd.clone() }).ok();
+                        return;
+                    }
+                }
+                if let Some(inputs) = cfg.key_map.get(name) {
+                    tx.send(ActionJob::Keyboard { name: name.to_string(), inputs: inputs.clone() }).ok();
+                    return;
+                }
+                for (launch_name, path, args) in &cfg.launch_actions {
+                    if launch_name == name {
+                        tx.send(ActionJob::Launch { name: name.to_string(), path: path.clone(), args: args.clone() }).ok();
+                        return;
+                    }
+                }
+                warn!("Gesture '{}' has no compiled action", name);
             }
         }
-        HookEvent::GestureEnded { matched: false, .. } => info!("Gesture: unmatched"),
+        HookEvent::GestureEnded { matched: false, .. } => debug!("Gesture: unmatched"),
         HookEvent::ReplaySyntheticClick { x, y } => {
             inject_synthetic_click(*x, *y);
         }
-        HookEvent::GestureStarted { .. } | HookEvent::TrailPoint { .. } => {}
+        HookEvent::GestureStarted { .. } | HookEvent::TrailPoint { .. }
+        | HookEvent::DirectionChanged { .. } | HookEvent::PatternCaptured { .. } => {}
         HookEvent::Error(msg) => error!("Hook: {}", msg),
     }
 }
@@ -399,6 +457,7 @@ unsafe extern "system" fn window_proc(
                             let _ = tray.update_status(&TrayState::Disabled { reason: "Session locked".into() });
                         }
                         if let Some(ref tx) = guard.hook_cmd_tx {
+                            let _ = tx.send(HookCommand::ForceReset);
                             let _ = tx.send(HookCommand::SetInterception(false));
                         }
                     }
@@ -413,6 +472,19 @@ unsafe extern "system" fn window_proc(
                         }
                         if let Some(ref tx) = guard.hook_cmd_tx {
                             let _ = tx.send(HookCommand::SetInterception(true));
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            if wparam.0 == TIMER_GESTURE_ID {
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState>;
+                if !state_ptr.is_null() {
+                    if let Ok(guard) = unsafe { &*state_ptr }.lock() {
+                        if let Some(ref tx) = guard.hook_cmd_tx {
+                            let _ = tx.send(HookCommand::ForceReset);
                         }
                     }
                 }
@@ -494,10 +566,10 @@ fn watch_config(path: std::path::PathBuf, cmd_tx: std::sync::mpsc::Sender<HookCo
 
 // ── DPI ────────────────────────────────────────────────────────
 
-fn set_pmv2_dpi_awareness() -> Result<()> {
+fn set_pmv2_dpi_awareness() {
     use windows::Win32::UI::HiDpi::{
         SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     };
-    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)?; }
-    Ok(())
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    info!("PMv2 DPI awareness enabled (via manifest or runtime)");
 }

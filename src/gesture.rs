@@ -20,6 +20,20 @@ pub struct Point {
     pub y: i32,
 }
 
+/// Classify the 8-direction label from two consecutive points.
+/// Screen coordinates: Y increases downward, so -dy = upward motion.
+pub fn direction_from_points(from: Point, to: Point) -> Direction {
+    let dx = (to.x - from.x) as f64;
+    let dy = (to.y - from.y) as f64;
+    let angle = (-dy).atan2(dx);
+    let angle = if angle < 0.0 { angle + std::f64::consts::TAU } else { angle };
+    let sector = ((angle + std::f64::consts::PI / 8.0) / (std::f64::consts::PI / 4.0)) as u8;
+    match sector % 8 {
+        0 => Direction::E, 1 => Direction::NE, 2 => Direction::N, 3 => Direction::NW,
+        4 => Direction::W, 5 => Direction::SW, 6 => Direction::S, _ => Direction::SE,
+    }
+}
+
 /// Result of gesture classification.
 #[derive(Debug, Clone)]
 pub enum GestureResult {
@@ -102,10 +116,27 @@ impl GestureBuffer {
         self.len
     }
 
-    /// Access stored points for recognition.
-    fn stored_points(&self) -> &[Point] {
+    /// Return the last two points if available, for direction computation.
+    pub fn last_two(&self) -> Option<(Point, Point)> {
+        if self.len >= 2 {
+            Some((self.points[self.len - 2], self.points[self.len - 1]))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn stored_points(&self) -> &[Point] {
         &self.points[..self.len]
     }
+}
+
+/// Encode a gesture buffer's direction sequence (simplify → quantize → collapse).
+pub fn encode_directions(buffer: &GestureBuffer, rdp_epsilon_sq: f64) -> Vec<Direction> {
+    if buffer.len() < 2 { return vec![]; }
+    let simplified = rdp_simplify(buffer.stored_points(), rdp_epsilon_sq);
+    if simplified.len() < 2 { return vec![]; }
+    let directions = quantize_directions(&simplified);
+    collapse_directions(&directions)
 }
 
 /// Classify a gesture from collected points.

@@ -20,7 +20,14 @@ pub fn launch_executable(path: &str, args: &[String]) -> Result<()> {
     let cmdline = if args.is_empty() {
         path.to_string()
     } else {
-        format!("\"{}\" {}", path, args.join(" "))
+        let quoted_args: Vec<String> = args.iter().map(|a| {
+            if a.contains(' ') || a.contains('"') {
+                format!("\"{}\"", a.replace('"', "\\\""))
+            } else {
+                a.clone()
+            }
+        }).collect();
+        format!("\"{}\" {}", path, quoted_args.join(" "))
     };
 
     let mut cmdline_wide: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
@@ -54,7 +61,7 @@ pub fn shell_open(path: &str) -> Result<()> {
     let operation: Vec<u16> = "open\0".encode_utf16().collect();
 
     unsafe {
-        let _result = ShellExecuteW(
+        let result = ShellExecuteW(
             None,
             windows::core::PCWSTR::from_raw(operation.as_ptr()),
             windows::core::PCWSTR::from_raw(path_wide.as_ptr()),
@@ -62,9 +69,12 @@ pub fn shell_open(path: &str) -> Result<()> {
             windows::core::PCWSTR::null(),
             SHOW_WINDOW_CMD(1),
         );
+        if result.0 as isize > 32 {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("ShellExecuteW failed with code {}", result.0 as isize))
+        }
     }
-
-    Ok(())
 }
 
 /// Focus an existing window (best effort).

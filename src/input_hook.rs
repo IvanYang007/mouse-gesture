@@ -2,7 +2,8 @@
 //! and the gesture buffer.
 
 use crate::config::ConfigSnapshot;
-use crate::gesture::{GestureBuffer, GestureResult, Point, classify};
+use crate::config::Direction;
+use crate::gesture::{GestureBuffer, GestureResult, Point, classify, direction_from_points, encode_directions};
 use crate::state_machine::{DownResult, GestureContext, StateMachine, UpResult};
 pub use crate::state_machine::SELF_TAG;
 
@@ -25,6 +26,8 @@ pub enum HookEvent {
     TrailPoint { x: i32, y: i32 },
     GestureEnded { matched: bool, gesture_name: Option<String> },
     ReplaySyntheticClick { x: i32, y: i32 },
+    DirectionChanged { direction: Direction, x: i32, y: i32 },
+    PatternCaptured { directions: Vec<Direction> },
     Error(String),
 }
 
@@ -33,6 +36,7 @@ pub enum HookEvent {
 pub enum HookCommand {
     UpdateConfig(ConfigSnapshot),
     SetInterception(bool),
+    ForceReset,
     Shutdown,
 }
 
@@ -47,6 +51,7 @@ pub struct HookShared {
 pub fn spawn_hook_thread(
     activation_threshold: i32,
     sample_distance: i32,
+    ui_hwnd_raw: isize,
 ) -> (
     thread::JoinHandle<()>,
     Arc<HookShared>,
@@ -66,8 +71,9 @@ pub fn spawn_hook_thread(
     let handle = thread::Builder::new()
         .name("mouse-hook".into())
         .spawn(move || {
+            let ui_hwnd = HWND(ui_hwnd_raw as *mut _);
             init_hook_state(activation_threshold, sample_distance);
-            let hook_proc = create_hook_proc(event_tx.clone());
+            let hook_proc = create_hook_proc(event_tx.clone(), shared_clone.clone(), ui_hwnd);
             let hook = unsafe {
                 SetWindowsHookExW(
                     WH_MOUSE_LL,
@@ -93,7 +99,7 @@ pub fn spawn_hook_thread(
                     break;
                 }
 
-                if let Ok(cmd) = cmd_rx.try_recv() {
+                while let Ok(cmd) = cmd_rx.try_recv() {
                     match cmd {
                         HookCommand::Shutdown => break,
                         HookCommand::UpdateConfig(snapshot) => {
@@ -103,6 +109,16 @@ pub fn spawn_hook_thread(
                         }
                         HookCommand::SetInterception(enabled) => {
                             shared_clone.interception_enabled.store(enabled, Ordering::SeqCst);
+                            HOOK_INTERCEPTION_ENABLED.with(|c| { *c.borrow_mut() = enabled; });
+                        }
+                        HookCommand::ForceReset => {
+                            HOOK_STATE_MACHINE.with(|sm| {
+                                if let Some(ref mut sm) = *sm.borrow_mut() { sm.force_reset(); }
+                            });
+                            HOOK_BUFFER.with(|buf| {
+                                if let Some(ref mut b) = *buf.borrow_mut() { b.clear(); }
+                            });
+                            HOOK_LAST_DIRECTION.with(|c| c.set(8));
                         }
                     }
                 }
@@ -130,15 +146,39 @@ thread_local! {
     static HOOK_BUFFER: std::cell::RefCell<Option<GestureBuffer>> = const { std::cell::RefCell::new(None) };
     static HOOK_STATE_MACHINE: std::cell::RefCell<Option<StateMachine>> = const { std::cell::RefCell::new(None) };
     static HOOK_EVENT_TX: std::cell::OnceCell<std::sync::mpsc::Sender<HookEvent>> = const { std::cell::OnceCell::new() };
+    static HOOK_INTERCEPTION_ENABLED: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
+    static HOOK_UI_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
+    static HOOK_LAST_DIRECTION: std::cell::Cell<u8> = const { std::cell::Cell::new(8) };
 }
 
 // ── Hook Procedure ─────────────────────────────────────────────
 
-fn create_hook_proc(event_tx: std::sync::mpsc::Sender<HookEvent>) -> HOOKPROC {
+fn create_hook_proc(event_tx: std::sync::mpsc::Sender<HookEvent>, shared: Arc<HookShared>, ui_hwnd: HWND) -> HOOKPROC {
     HOOK_EVENT_TX.with(|cell| {
         cell.set(event_tx).expect("HOOK_EVENT_TX already set");
     });
+    HOOK_INTERCEPTION_ENABLED.with(|c| {
+        *c.borrow_mut() = shared.interception_enabled.load(Ordering::Relaxed);
+    });
+    HOOK_UI_HWND.with(|c| { c.set(ui_hwnd.0 as isize); });
     Some(low_level_mouse_proc)
+}
+
+/// Send an event to the UI thread and wake its message pump immediately.
+fn post_event(event: HookEvent) {
+    HOOK_EVENT_TX.with(|tx| {
+        if let Some(tx) = tx.get() { let _ = tx.send(event); }
+    });
+    HOOK_UI_HWND.with(|c| {
+        let hwnd = c.get();
+        if hwnd != 0 {
+            unsafe {
+                use windows::Win32::Foundation::{WPARAM, LPARAM};
+                use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+                let _ = PostMessageW(Some(HWND(hwnd as *mut _)), 0x8002, WPARAM::default(), LPARAM::default());
+            }
+        }
+    });
 }
 
 unsafe extern "system" fn low_level_mouse_proc(
@@ -146,6 +186,9 @@ unsafe extern "system" fn low_level_mouse_proc(
 ) -> LRESULT {
     if code < 0 {
         return CallNextHookEx(None, code, wparam, lparam);
+    }
+    if !HOOK_INTERCEPTION_ENABLED.with(|c| *c.borrow()) {
+        return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         process_mouse_event(code, wparam, lparam)
@@ -196,10 +239,16 @@ fn handle_right_down(
     // Resolve the window under cursor
     let (target_hwnd, target_pid) = resolve_window_under_cursor(x, y);
 
-    // Determine eligibility
-    let is_eligible = target_pid != 0
-        && target_pid != std::process::id()
-        && HOOK_CONFIG.with(|c| c.borrow().as_ref().is_some());
+    // Determine eligibility (including blacklist/whitelist)
+    let is_eligible = HOOK_CONFIG.with(|c| {
+        c.borrow().as_ref().map(|cfg| {
+            let basic = target_pid != 0 && target_pid != std::process::id();
+            if !basic { return false; }
+            crate::app_policy::resolve_pid(target_pid, cfg)
+                .map(|e| e.is_eligible)
+                .unwrap_or(true)
+        }).unwrap_or(false)
+    });
 
     let foreground_hwnd = unsafe { GetForegroundWindow() };
 
@@ -223,7 +272,10 @@ fn handle_right_down(
     });
 
     match result {
-        DownResult::Consumed => LRESULT(1),
+        DownResult::Consumed => {
+            HOOK_LAST_DIRECTION.with(|c| c.set(8));
+            LRESULT(1)
+        }
         _ => unsafe { CallNextHookEx(None, code, wparam, lparam) },
     }
 }
@@ -253,23 +305,34 @@ fn handle_right_up(
 
     match result {
         UpResult::ReplaySynthetic => {
-            HOOK_EVENT_TX.with(|tx| {
-                if let Some(tx) = tx.get() {
-                    let _ = tx.send(HookEvent::ReplaySyntheticClick { x, y });
-                }
-            });
+            HOOK_LAST_DIRECTION.with(|c| c.set(8));
+            post_event(HookEvent::ReplaySyntheticClick { x, y });
             LRESULT(1)
         }
         UpResult::GestureComplete => {
+            HOOK_LAST_DIRECTION.with(|c| c.set(8));
+            // Check if config was hot-reloaded mid-gesture
+            let current_gen = HOOK_CONFIG.with(|c| {
+                c.borrow().as_ref().map(|cfg| cfg.generation).unwrap_or(0)
+            });
+            let captured_gen = HOOK_STATE_MACHINE.with(|sm| {
+                sm.borrow().as_ref().map(|s| s.current_generation()).unwrap_or(0)
+            });
+            let config_changed = current_gen != captured_gen;
+
             let classification = HOOK_BUFFER.with(|buf_cell| {
                 let result = {
                     let buf = buf_cell.borrow();
                     let buf_ref = buf.as_ref().expect("HOOK_BUFFER not initialized");
-                    HOOK_CONFIG.with(|cfg_cell| {
-                        let cfg = cfg_cell.borrow();
-                        let cfg_inner = cfg.as_ref().expect("HOOK_CONFIG not initialized");
-                        classify(buf_ref, &cfg_inner.gestures, cfg_inner.rdp_epsilon_sq, cfg_inner.min_gesture_length)
-                    })
+                    if config_changed {
+                        crate::gesture::GestureResult::NoMatch
+                    } else {
+                        HOOK_CONFIG.with(|cfg_cell| {
+                            let cfg = cfg_cell.borrow();
+                            let cfg_inner = cfg.as_ref().expect("HOOK_CONFIG not initialized");
+                            classify(buf_ref, &cfg_inner.gestures, cfg_inner.rdp_epsilon_sq, cfg_inner.min_gesture_length)
+                        })
+                    }
                 };
                 let mut buf = buf_cell.borrow_mut();
                 if let Some(ref mut b) = *buf { b.clear(); }
@@ -278,21 +341,13 @@ fn handle_right_up(
 
             match classification {
                 GestureResult::Matched { name, .. } => {
-                    HOOK_EVENT_TX.with(|tx| {
-                        if let Some(tx) = tx.get() {
-                            let _ = tx.send(HookEvent::GestureEnded {
-                                matched: true, gesture_name: Some(name),
-                            });
-                        }
+                    post_event(HookEvent::GestureEnded {
+                        matched: true, gesture_name: Some(name),
                     });
                 }
                 _ => {
-                    HOOK_EVENT_TX.with(|tx| {
-                        if let Some(tx) = tx.get() {
-                            let _ = tx.send(HookEvent::GestureEnded {
-                                matched: false, gesture_name: None,
-                            });
-                        }
+                    post_event(HookEvent::GestureEnded {
+                        matched: false, gesture_name: None,
                     });
                 }
             }
@@ -312,11 +367,7 @@ fn handle_mouse_move(
     });
 
     if activated {
-        let _ = HOOK_EVENT_TX.with(|tx| {
-            if let Some(tx) = tx.get() {
-                let _ = tx.send(HookEvent::GestureStarted { x, y, monitor: 0 });
-            }
-        });
+        post_event(HookEvent::GestureStarted { x, y, monitor: 0 });
     }
 
     let in_drawing = HOOK_STATE_MACHINE.with(|sm| {
@@ -330,6 +381,18 @@ fn handle_mouse_move(
             let mut buf = buf.borrow_mut();
             if let Some(ref mut buf) = *buf {
                 buf.add_point(Point { x, y });
+                if let Some((from, to)) = buf.last_two() {
+                    let dir = direction_from_points(from, to);
+                    let dir_idx = match dir {
+                        Direction::N => 0, Direction::NE => 1, Direction::E => 2,
+                        Direction::SE => 3, Direction::S => 4, Direction::SW => 5,
+                        Direction::W => 6, Direction::NW => 7,
+                    };
+                    let prev = HOOK_LAST_DIRECTION.with(|c| c.replace(dir_idx));
+                    if prev != dir_idx {
+                        post_event(HookEvent::DirectionChanged { direction: dir, x, y });
+                    }
+                }
             }
         });
     }

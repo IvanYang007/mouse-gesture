@@ -14,7 +14,7 @@ use windows::core::PCWSTR;
 
 // ── Singleton Mutex ────────────────────────────────────────────
 
-const MUTEX_NAME: &str = "Global\\MouseGestureDaemon_Singleton\0";
+const MUTEX_NAME: &str = "Local\\MouseGestureDaemon_Singleton\0";
 
 /// Ensure only one instance of the daemon runs per user session.
 pub fn acquire_singleton() -> Result<()> {

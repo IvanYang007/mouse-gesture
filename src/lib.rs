@@ -8,6 +8,7 @@ pub mod input_hook;
 pub mod input_inject;
 pub mod launch;
 pub mod lifecycle;
+pub mod overlay;
 pub mod state_machine;
 pub mod tray;
 pub mod win_handles;

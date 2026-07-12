@@ -88,6 +88,10 @@ impl StateMachine {
         is_eligible: bool,
         ctx: Option<GestureContext>,
     ) -> DownResult {
+        // Guard against double-click: reject if already in active gesture
+        if self.state != State::Idle && self.state != State::NativePass {
+            return DownResult::Injected;
+        }
         if is_injected {
             return DownResult::Injected;
         }
