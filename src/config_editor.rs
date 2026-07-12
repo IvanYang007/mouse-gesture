@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY, OUT_DEFAULT_PRECIS,
+    CreateFontW, DeleteObject, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY,
+    OUT_DEFAULT_PRECIS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
@@ -46,6 +47,8 @@ struct EditorState {
     save_button: HWND,
     /// Handle to the Cancel button.
     cancel_button: HWND,
+    /// Editor font handle — freed in WM_NCDESTROY.
+    font: windows::Win32::Graphics::Gdi::HFONT,
 }
 
 // ── Public API ─────────────────────────────────────────────────
@@ -231,6 +234,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
         edit,
         save_button,
         cancel_button,
+        font,
     });
     let state_ptr = Box::into_raw(state);
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
@@ -285,7 +289,10 @@ unsafe extern "system" fn editor_proc(
             let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
             if !state_ptr.is_null() {
                 unsafe {
-                    let _ = Box::from_raw(state_ptr);
+                    let state = Box::from_raw(state_ptr);
+                    if !state.font.is_invalid() {
+                        let _ = DeleteObject(state.font.into());
+                    }
                 }
             }
             // Clear global editor handle
