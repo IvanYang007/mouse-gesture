@@ -11,13 +11,15 @@ use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
-    PostQuitMessage, RegisterClassExW, TranslateMessage,
+    PostMessageW, PostQuitMessage, RegisterClassExW, TranslateMessage,
     SetWindowLongPtrW, GetWindowLongPtrW, GWLP_USERDATA,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MSG,
+    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MB_ICONERROR, MB_OK,
+    MessageBoxW, MSG,
     WINDOW_EX_STYLE, WS_OVERLAPPED,
     WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_QUERYENDSESSION,
     WM_RBUTTONUP,
 };
+use windows::core::w;
 
 const WINDOW_CLASS: &str = "MouseGestureDaemon\0";
 const WM_APP_RELOAD_CONFIG: u32 = WM_APP + 20;
@@ -545,10 +547,44 @@ unsafe extern "system" fn window_proc(
                         // Mutex released — safe to call show_context_menu (modal loop).
                         match mouse_gesture::tray::show_context_menu(hwnd) {
                             Ok(Some(cmd)) => match cmd {
-                                TrayCommand::Configure => info!("Tray: Configure"),
-                                TrayCommand::ReloadConfig => info!("Tray: Reload"),
-                                TrayCommand::OpenConfigFolder => info!("Tray: Open folder"),
-                                TrayCommand::Exit => info!("Tray: Exit"),
+                                TrayCommand::Configure => {
+                                    if let Err(e) = mouse_gesture::config_editor::open(hwnd, config_path()) {
+                                        let error_msg: Vec<u16> =
+                                            format!("Failed to open editor: {}\0", e).encode_utf16().collect();
+                                        MessageBoxW(
+                                            None,
+                                            windows::core::PCWSTR::from_raw(error_msg.as_ptr()),
+                                            w!("Editor Error"),
+                                            MB_OK | MB_ICONERROR,
+                                        );
+                                        error!("Failed to open editor: {}", e);
+                                    }
+                                }
+                                TrayCommand::ReloadConfig => {
+                                    PostMessageW(
+                                        Some(hwnd),
+                                        WM_APP_RELOAD_CONFIG,
+                                        WPARAM::default(),
+                                        LPARAM::default(),
+                                    );
+                                }
+                                TrayCommand::OpenConfigFolder => {
+                                    let parent = config_path()
+                                        .parent()
+                                        .map(|p| p.to_string_lossy().to_string())
+                                        .unwrap_or_default();
+                                    if let Err(e) = mouse_gesture::launch::shell_open(&parent) {
+                                        error!("Failed to open config folder: {}", e);
+                                    }
+                                }
+                                TrayCommand::Exit => {
+                                    PostMessageW(
+                                        Some(hwnd),
+                                        WM_CLOSE,
+                                        WPARAM::default(),
+                                        LPARAM::default(),
+                                    );
+                                }
                             },
                             Ok(None) => debug!("Tray: menu dismissed"),
                             Err(e) => error!("Tray: menu error: {}", e),
