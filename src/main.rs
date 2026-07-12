@@ -8,10 +8,12 @@ use mouse_gesture::tray::{TrayCommand, TrayIcon, TrayState};
 use mouse_gesture::lifecycle;
 use mouse_gesture::overlay::OverlayWindow;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, Ordering};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
-    PostMessageW, PostQuitMessage, RegisterClassExW, TranslateMessage,
+    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW,
+    TranslateMessage,
     SetWindowLongPtrW, GetWindowLongPtrW, GWLP_USERDATA,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MB_ICONERROR, MB_OK,
     MessageBoxW, MSG,
@@ -23,6 +25,7 @@ use windows::core::w;
 
 const WINDOW_CLASS: &str = "MouseGestureDaemon\0";
 const WM_APP_RELOAD_CONFIG: u32 = WM_APP + 20;
+static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone)]
 enum ActionJob {
@@ -102,6 +105,13 @@ fn run() -> Result<()> {
 
     // Hidden window
     let hwnd = create_notification_window()?;
+
+    // Register TaskbarCreated message for Explorer restart re-registration
+    let taskbar_msg = unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) };
+    if taskbar_msg == 0 {
+        warn!("RegisterWindowMessageW('TaskbarCreated') returned 0 — tray re-registration after Explorer restart unavailable");
+    }
+    TASKBAR_CREATED_MSG.store(taskbar_msg, Ordering::Release);
 
     // Session notifications
     lifecycle::register_session_notifications(hwnd)?;
@@ -511,6 +521,22 @@ unsafe extern "system" fn window_proc(
                         }
                         if let Some(ref ctrl) = guard.hook_ctrl {
                             let _ = ctrl.send(HookCommand::SetInterception(true));
+                        }
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        msg if msg == TASKBAR_CREATED_MSG.load(Ordering::Relaxed) && msg != 0 => {
+            // Re-register tray icon after Explorer restart
+            let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState>;
+            if !state_ptr.is_null() {
+                if let Ok(guard) = unsafe { &*state_ptr }.lock() {
+                    if let Some(ref tray) = guard.tray {
+                        if let Err(e) = tray.reregister() {
+                            error!("TaskbarCreated: tray re-register failed: {}", e);
+                        } else {
+                            info!("Tray icon re-registered after Explorer restart");
                         }
                     }
                 }
