@@ -1739,7 +1739,7 @@ unsafe fn update_doc_action_type(state: &mut EditorState, name: &str, action_typ
     match action_type {
         0 => {
             action.insert("type", "window".into());
-            action.insert("command", "Maximize".into());
+            action.insert("command", "maximize".into());
         }
         1 => {
             action.insert("type", "key".into());
@@ -1883,24 +1883,24 @@ unsafe fn handle_window_cmd_change(state: &mut EditorState) {
     update_listview_row(state, index);
 }
 
-/// Map ComboBox index to WindowCommand string.
+/// Map ComboBox index to WindowCommand string (TOML kebab-case form).
 fn get_window_cmd_name(idx: usize) -> &'static str {
     match idx {
-        0 => "Maximize",
-        1 => "Minimize",
-        2 => "Restore",
-        3 => "Close",
-        4 => "SnapLeft",
-        5 => "SnapRight",
-        6 => "SnapTop",
-        7 => "SnapBottom",
-        8 => "SnapTopLeft",
-        9 => "SnapTopRight",
-        10 => "SnapBottomLeft",
-        11 => "SnapBottomRight",
-        12 => "Center",
-        13 => "ToggleAlwaysOnTop",
-        _ => "Maximize",
+        0 => "maximize",
+        1 => "minimize",
+        2 => "restore",
+        3 => "close",
+        4 => "snap-left",
+        5 => "snap-right",
+        6 => "snap-top",
+        7 => "snap-bottom",
+        8 => "snap-top-left",
+        9 => "snap-top-right",
+        10 => "snap-bottom-left",
+        11 => "snap-bottom-right",
+        12 => "center",
+        13 => "toggle-always-on-top",
+        _ => "maximize",
     }
 }
 
@@ -2690,20 +2690,20 @@ fn validate_form(state: &EditorState) -> Result<()> {
 /// Check whether a window command string is a valid variant.
 fn is_valid_window_command(cmd: &str) -> bool {
     let valid: [&str; 14] = [
-        "Maximize",
-        "Minimize",
-        "Restore",
-        "Close",
-        "SnapLeft",
-        "SnapRight",
-        "SnapTop",
-        "SnapBottom",
-        "SnapTopLeft",
-        "SnapTopRight",
-        "SnapBottomLeft",
-        "SnapBottomRight",
-        "Center",
-        "ToggleAlwaysOnTop",
+        "maximize",
+        "minimize",
+        "restore",
+        "close",
+        "snap-left",
+        "snap-right",
+        "snap-top",
+        "snap-bottom",
+        "snap-top-left",
+        "snap-top-right",
+        "snap-bottom-left",
+        "snap-bottom-right",
+        "center",
+        "toggle-always-on-top",
     ];
     valid.contains(&cmd)
 }
