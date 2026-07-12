@@ -15,11 +15,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, GetWindowLongPtrW, GWLP_USERDATA,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MSG,
     WINDOW_EX_STYLE, WS_OVERLAPPED,
-    WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_QUERYENDSESSION,
+    WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_QUERYENDSESSION,
     WM_RBUTTONUP,
 };
 
 const WINDOW_CLASS: &str = "MouseGestureDaemon\0";
+const WM_APP_RELOAD_CONFIG: u32 = WM_APP + 20;
 
 #[derive(Debug, Clone)]
 enum ActionJob {
@@ -156,9 +157,9 @@ fn run() -> Result<()> {
 
     // Config watcher thread
     let cfg_path = config_path();
-    let cfg_ctrl = hook_ctrl.clone();
+    let hwnd_raw = hwnd.0 as isize;
     std::thread::Builder::new().name("config-watcher".into()).spawn(move || {
-        watch_config(cfg_path, cfg_ctrl);
+        watch_config(cfg_path, hwnd_raw);
     })?;
 
     // Overlay
@@ -514,6 +515,10 @@ unsafe extern "system" fn window_proc(
             }
             LRESULT(0)
         }
+        msg if msg == WM_APP_RELOAD_CONFIG => {
+            reload_config(hwnd);
+            LRESULT(0)
+        }
         _ => {
             // Handle tray callback — lock briefly only to check if this message
             // belongs to the tray icon, then release before any modal operation.
@@ -576,9 +581,73 @@ fn load_startup_config() -> Result<Option<ConfigSnapshot>> {
     }
 }
 
+fn reload_config(hwnd: HWND) {
+    let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
+    if state_ptr.is_null() {
+        error!("reload_config: state_ptr is null");
+        return;
+    }
+    let state = unsafe { &*state_ptr };
+    let mut guard = match state.lock() {
+        Ok(g) => g,
+        Err(e) => {
+            error!("reload_config: mutex poisoned: {}", e);
+            return;
+        }
+    };
+
+    match ConfigFile::load(&config_path()) {
+        Ok(cfg) => match cfg.compile(1, 96) {
+            Ok(snapshot) => {
+                // Publish updated policy snapshot
+                mouse_gesture::app_policy::publish_snapshot(
+                    mouse_gesture::app_policy::PolicySnapshot::from_snapshot(&snapshot)
+                );
+                // Sync autostart
+                mouse_gesture::autostart::sync(snapshot.start_with_windows);
+                // Update hook
+                if let Some(ref ctrl) = guard.hook_ctrl {
+                    let _ = ctrl.send(HookCommand::UpdateConfig(snapshot.clone()));
+                    let _ = ctrl.send(HookCommand::SetInterception(true));
+                }
+                // Update state
+                let gesture_count = snapshot.gestures.len();
+                guard.config = Some(snapshot);
+                // Update tray
+                if let Some(ref tray) = guard.tray {
+                    let _ = tray.update_status(&TrayState::Active { gesture_count });
+                }
+                info!("Config reloaded: {} gestures", gesture_count);
+            }
+            Err(e) => {
+                error!("Config reload failed: {}", e);
+                // Do NOT replace existing valid config.
+                // Set tray to error state.
+                if let Some(ref tray) = guard.tray {
+                    let _ = tray.update_status(&TrayState::Error { message: e.to_string() });
+                }
+                // Keep interception as-is: prior valid config stays active;
+                // if none, interception stays disabled.
+            }
+        },
+        Err(e) => {
+            error!("Config reload failed: {}", e);
+            // Set tray to error state.
+            if let Some(ref tray) = guard.tray {
+                let _ = tray.update_status(&TrayState::Error { message: e.to_string() });
+            }
+            // Keep interception as-is.
+        }
+    }
+}
+
 /// Poll the config file periodically for changes.
-fn watch_config(path: std::path::PathBuf, ctrl: HookController) {
+fn watch_config(path: std::path::PathBuf, owner: isize) {
     use std::time::Duration;
+    use windows::Win32::Foundation::{HWND, WPARAM, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+
+    let hwnd = HWND(owner as *mut _);
     let mut last_modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
     loop {
         std::thread::sleep(Duration::from_secs(2));
@@ -587,21 +656,9 @@ fn watch_config(path: std::path::PathBuf, ctrl: HookController) {
                 let modified = meta.modified().ok();
                 if modified != last_modified {
                     last_modified = modified;
-                    match ConfigFile::load(&path) {
-                        Ok(cfg) => match cfg.compile(1, 96) {
-                            Ok(snapshot) => {
-                                info!("Config reloaded: {} gestures", snapshot.gestures.len());
-                                // Publish updated policy snapshot
-                                mouse_gesture::app_policy::publish_snapshot(
-                                    mouse_gesture::app_policy::PolicySnapshot::from_snapshot(&snapshot)
-                                );
-                                mouse_gesture::autostart::sync(snapshot.start_with_windows);
-                                let _ = ctrl.send(HookCommand::UpdateConfig(snapshot));
-                                let _ = ctrl.send(HookCommand::SetInterception(true));
-                            }
-                            Err(e) => warn!("Config reload failed: {}. Keeping previous.", e),
-                        },
-                        Err(e) => warn!("Config read failed: {}", e),
+                    debug!("Config file changed, posting reload message");
+                    unsafe {
+                        PostMessageW(Some(hwnd), WM_APP_RELOAD_CONFIG, WPARAM::default(), LPARAM::default());
                     }
                 }
             }
