@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use toml_edit::DocumentMut;
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, DeleteObject, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY, HFONT,
     OUT_DEFAULT_PRECIS,
@@ -28,16 +28,15 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, PostMessageW,
-    RegisterClassExW, SendMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow, BM_GETCHECK,
-    BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE, CBS_DROPDOWNLIST,
-    CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, EN_CHANGE, ES_AUTOHSCROLL, ES_LEFT, ES_MULTILINE,
-    ES_WANTRETURN, GWLP_USERDATA, HMENU, IDCANCEL, IDNO, IDYES, MB_ICONERROR, MB_ICONQUESTION,
-    MB_OK, MB_YESNOCANCEL, SM_CXSCREEN, SM_CYSCREEN,
-    SWP_NOZORDER, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD, WS_EX_CLIENTEDGE,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
+    GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, PostMessageW, RegisterClassExW,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE,
+    CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, EN_CHANGE, ES_AUTOHSCROLL, ES_LEFT,
+    ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, HMENU, IDCANCEL, IDNO, IDYES, MB_ICONERROR,
+    MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL, MINMAXINFO, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER,
+    SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_GETMINMAXINFO, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD,
+    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
 };
 
 const EDITOR_CLASS: &str = "MouseGestureEditor\0";
@@ -112,6 +111,19 @@ struct EditorState {
     h_btn_delete: HWND,
     h_btn_save: HWND,
     h_btn_cancel: HWND,
+    // Labels (for repositioning on resize)
+    h_label_gesture_name: HWND,
+    h_label_pattern: HWND,
+    h_label_action_type: HWND,
+    h_label_divider: HWND,
+    h_label_settings: HWND,
+    h_label_threshold: HWND,
+    h_label_sample: HWND,
+    h_label_epsilon: HWND,
+    h_label_min_len: HWND,
+    h_label_blacklist: HWND,
+    h_label_blacklist_mode: HWND,
+    h_label_blacklist_apps: HWND,
     // Font
     h_font: HFONT,
 }
@@ -243,13 +255,13 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
 
     // ── Right-side gesture form ─────────────────────────────
 
-    create_label(hwnd, "Gesture Name:", 545, 10, 100, 16)?;
+    let h_label_gesture_name = create_label(hwnd, "Gesture Name:", 545, 10, 100, 16)?;
     let h_edit_name = create_edit(hwnd, ID_EDIT_NAME, 545, 28, 245, 22)?;
 
-    create_label(hwnd, "Pattern:", 545, 55, 100, 16)?;
+    let h_label_pattern = create_label(hwnd, "Pattern:", 545, 55, 100, 16)?;
     let h_edit_pattern = create_edit(hwnd, ID_EDIT_PATTERN, 545, 73, 245, 22)?;
 
-    create_label(hwnd, "Action Type:", 545, 100, 100, 16)?;
+    let h_label_action_type = create_label(hwnd, "Action Type:", 545, 100, 100, 16)?;
     let h_combo_action_type = create_combo(hwnd, ID_COMBO_ACTION_TYPE, 545, 118, 245, 200)?;
 
     // Action-specific controls (initially hidden)
@@ -269,7 +281,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     // ── Settings panel (bottom) ─────────────────────────────
 
     // Divider line
-    create_label(
+    let h_label_divider = create_label(
         hwnd,
         "──────────────────────────────────────",
         5,
@@ -277,20 +289,20 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
         530,
         16,
     )?;
-    create_label(hwnd, "Settings", 5, 405, 60, 16)?;
+    let h_label_settings = create_label(hwnd, "Settings", 5, 405, 60, 16)?;
 
     // Row 1: Threshold, Sample, Epsilon
-    create_label(hwnd, "Threshold:", 5, 425, 60, 16)?;
+    let h_label_threshold = create_label(hwnd, "Threshold:", 5, 425, 60, 16)?;
     let h_edit_threshold = create_edit(hwnd, ID_EDIT_THRESHOLD, 68, 423, 60, 22)?;
 
-    create_label(hwnd, "Sample:", 138, 425, 50, 16)?;
+    let h_label_sample = create_label(hwnd, "Sample:", 138, 425, 50, 16)?;
     let h_edit_sample = create_edit(hwnd, ID_EDIT_SAMPLE, 188, 423, 60, 22)?;
 
-    create_label(hwnd, "Epsilon:", 258, 425, 50, 16)?;
+    let h_label_epsilon = create_label(hwnd, "Epsilon:", 258, 425, 50, 16)?;
     let h_edit_epsilon = create_edit(hwnd, ID_EDIT_EPSILON, 308, 423, 60, 22)?;
 
     // Row 2: Min Len, Debug, Startup
-    create_label(hwnd, "Min Len:", 5, 452, 55, 16)?;
+    let h_label_min_len = create_label(hwnd, "Min Len:", 5, 452, 55, 16)?;
     let h_edit_min_len = create_edit(hwnd, ID_EDIT_MIN_LEN, 60, 450, 50, 22)?;
 
     let h_check_debug = create_checkbox(hwnd, ID_CHECK_DEBUG, "Debug logging", 130, 450, 120, 22)?;
@@ -306,11 +318,11 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
 
     // ── Blacklist section ───────────────────────────────────
 
-    create_label(hwnd, "Blacklist", 5, 480, 60, 16)?;
-    create_label(hwnd, "Mode:", 5, 498, 40, 16)?;
+    let h_label_blacklist = create_label(hwnd, "Blacklist", 5, 480, 60, 16)?;
+    let h_label_blacklist_mode = create_label(hwnd, "Mode:", 5, 498, 40, 16)?;
     let h_blacklist_mode = create_combo(hwnd, ID_COMBO_BLACKLIST_MODE, 45, 496, 120, 200)?;
 
-    create_label(hwnd, "Apps:", 175, 498, 40, 16)?;
+    let h_label_blacklist_apps = create_label(hwnd, "Apps:", 175, 498, 40, 16)?;
     let h_blacklist_apps = {
         let edit_class: Vec<u16> = "EDIT\0".encode_utf16().collect();
         let style = WINDOW_STYLE(
@@ -413,6 +425,18 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
         h_btn_delete,
         h_btn_save,
         h_btn_cancel,
+        h_label_gesture_name,
+        h_label_pattern,
+        h_label_action_type,
+        h_label_divider,
+        h_label_settings,
+        h_label_threshold,
+        h_label_sample,
+        h_label_epsilon,
+        h_label_min_len,
+        h_label_blacklist,
+        h_label_blacklist_mode,
+        h_label_blacklist_apps,
         h_font,
     });
     let state_ptr = Box::into_raw(state);
@@ -613,16 +637,12 @@ unsafe extern "system" fn editor_proc(
 ) -> LRESULT {
     match msg {
         WM_CLOSE => {
-            let state_ptr =
-                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
+            let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
             if !state_ptr.is_null() {
                 let state = unsafe { &mut *state_ptr };
                 if state.dirty {
-                    let title: Vec<u16> =
-                        "Unsaved Changes\0".encode_utf16().collect();
-                    let msg: Vec<u16> = "Save changes to configuration?\0"
-                        .encode_utf16()
-                        .collect();
+                    let title: Vec<u16> = "Unsaved Changes\0".encode_utf16().collect();
+                    let msg: Vec<u16> = "Save changes to configuration?\0".encode_utf16().collect();
                     let result = unsafe {
                         MessageBoxW(
                             Some(hwnd),
@@ -673,6 +693,12 @@ unsafe extern "system" fn editor_proc(
             LRESULT(0)
         }
 
+        WM_GETMINMAXINFO => {
+            let minmax = &mut *(lparam.0 as *mut MINMAXINFO);
+            minmax.ptMinTrackSize = POINT { x: 700, y: 500 };
+            LRESULT(0)
+        }
+
         WM_SIZE => {
             let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
             if state_ptr.is_null() {
@@ -683,16 +709,314 @@ unsafe extern "system" fn editor_proc(
             let client_w = (lparam.0 as u32 & 0xffff) as i32;
             let client_h = ((lparam.0 as u32 >> 16) & 0xffff) as i32;
 
-            // ListView: left side, fills most of the height
-            let lv_w = client_w * 2 / 3;
-            let lv_h = client_h - 220;
+            // ── Top section ────────────────────────────────
+            let top_h = client_h - 220;
+
+            // ListView: left 2/3, fills from top to settings
+            let lv_w = client_w * 2 / 3 - 15;
             unsafe {
-                let _ = SetWindowPos(state.h_listview, None, 5, 5, lv_w - 10, lv_h, SWP_NOZORDER);
+                let _ = SetWindowPos(state.h_listview, None, 5, 5, lv_w, top_h - 10, SWP_NOZORDER);
             }
 
-            // Save / Cancel buttons: bottom-right
-            let btn_y = client_h - 35;
+            // ── Form panel: right 1/3 ──────────────────────
+            let form_x = client_w * 2 / 3 + 5;
+            let form_w = client_w / 3 - 10;
+            let ctrl_w = form_w - 5;
+
             unsafe {
+                // Labels and edits
+                let _ = SetWindowPos(
+                    state.h_label_gesture_name,
+                    None,
+                    form_x,
+                    10,
+                    form_w,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_edit_name,
+                    None,
+                    form_x,
+                    28,
+                    ctrl_w,
+                    22,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_label_pattern,
+                    None,
+                    form_x,
+                    55,
+                    form_w,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_edit_pattern,
+                    None,
+                    form_x,
+                    73,
+                    ctrl_w,
+                    22,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_label_action_type,
+                    None,
+                    form_x,
+                    100,
+                    form_w,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_combo_action_type,
+                    None,
+                    form_x,
+                    118,
+                    ctrl_w,
+                    200,
+                    SWP_NOZORDER,
+                );
+
+                // Action-specific controls
+                let _ = SetWindowPos(
+                    state.h_edit_action,
+                    None,
+                    form_x,
+                    148,
+                    ctrl_w,
+                    22,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_combo_window_cmd,
+                    None,
+                    form_x,
+                    148,
+                    ctrl_w,
+                    200,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_edit_launch_path,
+                    None,
+                    form_x,
+                    148,
+                    ctrl_w,
+                    22,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_edit_launch_args,
+                    None,
+                    form_x,
+                    178,
+                    ctrl_w,
+                    22,
+                    SWP_NOZORDER,
+                );
+
+                // Placeholder
+                let _ = SetWindowPos(
+                    state.h_placeholder,
+                    None,
+                    form_x,
+                    10,
+                    form_w,
+                    80,
+                    SWP_NOZORDER,
+                );
+
+                // Form buttons
+                let _ = SetWindowPos(state.h_btn_add, None, form_x, 340, 75, 25, SWP_NOZORDER);
+                let _ = SetWindowPos(
+                    state.h_btn_clear,
+                    None,
+                    form_x + 83,
+                    340,
+                    75,
+                    25,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_btn_delete,
+                    None,
+                    form_x + 166,
+                    340,
+                    75,
+                    25,
+                    SWP_NOZORDER,
+                );
+            }
+
+            // ── Settings panel (bottom) ─────────────────────
+            let settings_y = client_h - 220;
+
+            unsafe {
+                let _ = SetWindowPos(
+                    state.h_label_divider,
+                    None,
+                    5,
+                    settings_y + 5,
+                    client_w - 10,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_label_settings,
+                    None,
+                    5,
+                    settings_y + 25,
+                    60,
+                    16,
+                    SWP_NOZORDER,
+                );
+
+                // Row 1: Threshold, Sample, Epsilon
+                let _ = SetWindowPos(
+                    state.h_label_threshold,
+                    None,
+                    5,
+                    settings_y + 45,
+                    60,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_edit_threshold,
+                    None,
+                    68,
+                    settings_y + 43,
+                    60,
+                    22,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_label_sample,
+                    None,
+                    138,
+                    settings_y + 45,
+                    50,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_edit_sample,
+                    None,
+                    188,
+                    settings_y + 43,
+                    60,
+                    22,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_label_epsilon,
+                    None,
+                    258,
+                    settings_y + 45,
+                    50,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_edit_epsilon,
+                    None,
+                    308,
+                    settings_y + 43,
+                    60,
+                    22,
+                    SWP_NOZORDER,
+                );
+
+                // Row 2: Min Len, Debug, Startup
+                let _ = SetWindowPos(
+                    state.h_label_min_len,
+                    None,
+                    5,
+                    settings_y + 72,
+                    55,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_edit_min_len,
+                    None,
+                    60,
+                    settings_y + 70,
+                    50,
+                    22,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_check_debug,
+                    None,
+                    130,
+                    settings_y + 70,
+                    120,
+                    22,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_check_startup,
+                    None,
+                    260,
+                    settings_y + 70,
+                    140,
+                    22,
+                    SWP_NOZORDER,
+                );
+
+                // ── Blacklist section ───────────────────────
+                let _ = SetWindowPos(
+                    state.h_label_blacklist,
+                    None,
+                    5,
+                    settings_y + 100,
+                    60,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_label_blacklist_mode,
+                    None,
+                    5,
+                    settings_y + 118,
+                    40,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_blacklist_mode,
+                    None,
+                    45,
+                    settings_y + 116,
+                    120,
+                    200,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_label_blacklist_apps,
+                    None,
+                    175,
+                    settings_y + 118,
+                    40,
+                    16,
+                    SWP_NOZORDER,
+                );
+                let _ = SetWindowPos(
+                    state.h_blacklist_apps,
+                    None,
+                    220,
+                    settings_y + 116,
+                    client_w - 230,
+                    50,
+                    SWP_NOZORDER,
+                );
+
+                // ── Save / Cancel buttons ───────────────────
+                let btn_y = client_h - 35;
                 let _ = SetWindowPos(
                     state.h_btn_cancel,
                     None,
@@ -2282,16 +2606,10 @@ fn validate_form(state: &EditorState) -> Result<()> {
             }
 
             if let Some(action) = gesture.get("action").and_then(|v| v.as_inline_table()) {
-                let action_type = action
-                    .get("type")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let action_type = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match action_type {
                     "window" => {
-                        let cmd = action
-                            .get("command")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let cmd = action.get("command").and_then(|v| v.as_str()).unwrap_or("");
                         if cmd.is_empty() || !is_valid_window_command(cmd) {
                             return Err(anyhow::anyhow!(
                                 "Invalid window command '{}' for gesture '{}'.",
@@ -2313,10 +2631,7 @@ fn validate_form(state: &EditorState) -> Result<()> {
                         }
                     }
                     "launch" => {
-                        let path = action
-                            .get("path")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("");
+                        let path = action.get("path").and_then(|v| v.as_str()).unwrap_or("");
                         if path.is_empty() {
                             return Err(anyhow::anyhow!(
                                 "Launch path is empty for gesture '{}'.",
@@ -2352,14 +2667,9 @@ fn validate_form(state: &EditorState) -> Result<()> {
                 ));
             }
         }
-        if let Some(v) = settings
-            .get("rdp_epsilon_dip")
-            .and_then(|v| v.as_float())
-        {
+        if let Some(v) = settings.get("rdp_epsilon_dip").and_then(|v| v.as_float()) {
             if v <= 0.0 {
-                return Err(anyhow::anyhow!(
-                    "RDP epsilon must be a positive number."
-                ));
+                return Err(anyhow::anyhow!("RDP epsilon must be a positive number."));
             }
         }
         if let Some(v) = settings
