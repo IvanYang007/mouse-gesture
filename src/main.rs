@@ -133,9 +133,16 @@ fn run() -> Result<()> {
         info!("Worker stopped");
     })?;
 
-    // Hook thread + recognition worker + replay worker
-    let (_hook_handle, _recog_handle, _replay_handle, _hook_shared, hook_ctrl, hook_event_rx) =
+    // Hook thread + recognition worker + replay worker + policy worker
+    let (_hook_handle, _recog_handle, _replay_handle, _policy_handle, _hook_shared, hook_ctrl, hook_event_rx) =
         input_hook::spawn_hook_thread(3, 2, hwnd.0 as isize);
+
+    // Publish initial policy snapshot
+    if let Some(ref cfg) = config {
+        mouse_gesture::app_policy::publish_snapshot(
+            mouse_gesture::app_policy::PolicySnapshot::from_snapshot(cfg)
+        );
+    }
 
     if let Some(ref cfg) = config {
         hook_ctrl.send(HookCommand::UpdateConfig(cfg.clone())).ok();
@@ -183,6 +190,7 @@ fn run() -> Result<()> {
     }
     hook_ctrl.send(HookCommand::Shutdown).ok();
     // Wait for all threads to join
+    let _ = _policy_handle.join();
     let _ = _replay_handle.join();
     let _ = _recog_handle.join();
     let _ = _hook_handle.join();
@@ -545,6 +553,10 @@ fn watch_config(path: std::path::PathBuf, ctrl: HookController) {
                         Ok(cfg) => match cfg.compile(1, 96) {
                             Ok(snapshot) => {
                                 info!("Config reloaded: {} gestures", snapshot.gestures.len());
+                                // Publish updated policy snapshot
+                                mouse_gesture::app_policy::publish_snapshot(
+                                    mouse_gesture::app_policy::PolicySnapshot::from_snapshot(&snapshot)
+                                );
                                 let _ = ctrl.send(HookCommand::UpdateConfig(snapshot));
                                 let _ = ctrl.send(HookCommand::SetInterception(true));
                             }

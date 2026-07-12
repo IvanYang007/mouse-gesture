@@ -6,6 +6,7 @@ use crate::config::Direction;
 use crate::gesture::{GestureBuffer, GestureResult, Point, classify, direction_from_points, MAX_POINTS};
 use crate::state_machine::{DownResult, GestureContext, StateMachine, UpResult};
 pub use crate::state_machine::SELF_TAG;
+use crate::app_policy::{self, Eligibility};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -113,6 +114,7 @@ pub fn spawn_hook_thread(
     thread::JoinHandle<()>,           // hook join handle
     thread::JoinHandle<()>,           // recognition worker join handle
     thread::JoinHandle<()>,           // replay worker join handle
+    thread::JoinHandle<()>,           // policy worker join handle
     Arc<HookShared>,
     HookController,
     std::sync::mpsc::Receiver<HookEvent>,
@@ -134,6 +136,9 @@ pub fn spawn_hook_thread(
     // Click replay channel — bounded, capacity 1 (newest overwrites oldest)
     let (replay_tx, replay_rx) = std::sync::mpsc::sync_channel::<ClickReplay>(1);
 
+    // Policy resolution queue — unknown PIDs from hook → policy worker
+    let (policy_tx, policy_rx) = std::sync::mpsc::channel::<u32>();
+
     let event_tx_clone = event_tx.clone();
     let shared_clone2 = shared.clone();
 
@@ -147,6 +152,7 @@ pub fn spawn_hook_thread(
                 event_tx.clone(),
                 completion_tx,
                 replay_tx,
+                policy_tx,
                 shared_clone.clone(),
                 ui_hwnd,
             );
@@ -272,10 +278,44 @@ pub fn spawn_hook_thread(
         })
         .expect("spawn replay worker");
 
+    // ── Policy worker ──────────────────────────────────────────
+    let shared_clone4 = shared.clone();
+    let policy_handle = thread::Builder::new()
+        .name("policy-resolver".into())
+        .spawn(move || {
+            while let Ok(pid) = policy_rx.recv() {
+                if shared_clone4.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                // Read current config to resolve PID
+                let snapshot = app_policy::get_snapshot();
+                if let Some(current) = snapshot {
+                    // Build updated snapshot and publish
+                    let mut new_snapshot = app_policy::PolicySnapshot {
+                        mode: current.mode.clone(),
+                        generation: current.generation,
+                        known_pids: current.known_pids.clone(),
+                    };
+                    // Use resolve_pid to determine eligibility
+                    let entry = HOOK_CONFIG.with(|c| {
+                        c.borrow().as_ref().and_then(|cfg| app_policy::resolve_pid(pid, cfg))
+                    });
+                    if let Some(entry) = entry {
+                        let eligibility = if entry.is_eligible { Eligibility::Allowed } else { Eligibility::Denied };
+                        new_snapshot.known_pids.insert(pid, eligibility);
+                        log::debug!("Policy: PID {} -> {} ({})", pid, entry.basename, if entry.is_eligible { "allowed" } else { "denied" });
+                    }
+                    app_policy::publish_snapshot(new_snapshot);
+                }
+            }
+            log::info!("Policy worker shut down");
+        })
+        .expect("spawn policy worker");
+
     let hook_thread_id = ready_rx.recv().expect("hook thread not ready");
     let controller = HookController { cmd_tx, hook_thread_id };
 
-    (handle, recog_handle, replay_handle, shared, controller, event_rx)
+    (handle, recog_handle, replay_handle, policy_handle, shared, controller, event_rx)
 }
 
 /// Process a single hook command (called from the hook thread).
@@ -331,6 +371,7 @@ thread_local! {
     static HOOK_EVENT_TX: std::cell::OnceCell<std::sync::mpsc::Sender<HookEvent>> = const { std::cell::OnceCell::new() };
     static HOOK_COMPLETION_TX: std::cell::OnceCell<std::sync::mpsc::SyncSender<GestureCompletion>> = const { std::cell::OnceCell::new() };
     static HOOK_REPLAY_TX: std::cell::OnceCell<std::sync::mpsc::SyncSender<ClickReplay>> = const { std::cell::OnceCell::new() };
+    static HOOK_POLICY_QUEUE: std::cell::OnceCell<std::sync::mpsc::Sender<u32>> = const { std::cell::OnceCell::new() };
     static HOOK_INTERCEPTION_ENABLED: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
     static HOOK_UI_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static HOOK_LAST_DIRECTION: std::cell::Cell<u8> = const { std::cell::Cell::new(8) };
@@ -342,12 +383,14 @@ fn create_hook_proc(
     event_tx: std::sync::mpsc::Sender<HookEvent>,
     completion_tx: std::sync::mpsc::SyncSender<GestureCompletion>,
     replay_tx: std::sync::mpsc::SyncSender<ClickReplay>,
+    policy_queue: std::sync::mpsc::Sender<u32>,
     shared: Arc<HookShared>,
     ui_hwnd: HWND,
 ) -> HOOKPROC {
     HOOK_EVENT_TX.with(|cell| { cell.set(event_tx).expect("HOOK_EVENT_TX already set"); });
     HOOK_COMPLETION_TX.with(|cell| { cell.set(completion_tx).expect("HOOK_COMPLETION_TX already set"); });
     HOOK_REPLAY_TX.with(|cell| { cell.set(replay_tx).expect("HOOK_REPLAY_TX already set"); });
+    HOOK_POLICY_QUEUE.with(|cell| { cell.set(policy_queue).expect("HOOK_POLICY_QUEUE already set"); });
     HOOK_INTERCEPTION_ENABLED.with(|c| {
         *c.borrow_mut() = shared.interception_enabled.load(Ordering::Relaxed);
     });
@@ -458,15 +501,26 @@ fn handle_right_down(
 
     let (target_hwnd, target_pid) = resolve_window_under_cursor(x, y);
 
-    let is_eligible = HOOK_CONFIG.with(|c| {
-        c.borrow().as_ref().map(|cfg| {
-            let basic = target_pid != 0 && target_pid != std::process::id();
-            if !basic { return false; }
-            crate::app_policy::resolve_pid(target_pid, cfg)
-                .map(|e| e.is_eligible)
-                .unwrap_or(true)
-        }).unwrap_or(false)
-    });
+    // Determine eligibility from the atomic policy snapshot (P0.3).
+    // Zero-allocation, lock-free read from the hook callback.
+    let is_eligible = if target_pid == 0 || target_pid == std::process::id() {
+        false
+    } else {
+        match app_policy::get_snapshot() {
+            Some(snapshot) => {
+                match snapshot.lookup(target_pid) {
+                    Some(Eligibility::Allowed) => true,
+                    Some(Eligibility::Denied) => false,
+                    None => {
+                        // Unknown PID — enqueue async resolution, apply default
+                        enqueue_policy_resolution(target_pid);
+                        snapshot.default_for_unknown() == Eligibility::Allowed
+                    }
+                }
+            }
+            None => true, // no snapshot yet — default allow
+        }
+    };
 
     let foreground_hwnd = unsafe { GetForegroundWindow() };
 
@@ -674,6 +728,16 @@ fn enqueue_replay(replay: ClickReplay) {
     HOOK_REPLAY_TX.with(|tx| {
         if let Some(tx) = tx.get() {
             let _ = tx.try_send(replay);
+        }
+    });
+}
+
+/// Enqueue an unknown PID for async resolution by the policy worker.
+/// Fire-and-forget — if the channel is full, drop silently.
+fn enqueue_policy_resolution(pid: u32) {
+    HOOK_POLICY_QUEUE.with(|tx| {
+        if let Some(tx) = tx.get() {
+            let _ = tx.send(pid);
         }
     });
 }

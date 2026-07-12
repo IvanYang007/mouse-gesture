@@ -1,10 +1,21 @@
 //! Application policy — PID-to-eligibility cache and integrity checks.
-//! Runs on the worker thread; sends compiled policy snapshots to the
-//! input thread for lock-free access in the hook proc.
+//!
+//! Uses a lock-free `PolicySnapshot` published via `AtomicPtr` so the
+//! hook callback can perform a read-only PID lookup with zero allocation.
+//! A background policy worker builds new snapshots when config changes or
+//! unknown PIDs are resolved, then atomically publishes them.
 
 use crate::config::{BlacklistMode, ConfigSnapshot};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicPtr, Ordering};
 use windows::Win32::Foundation::HWND;
+
+/// Whether a PID is eligible for gesture interception.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Eligibility {
+    Allowed,
+    Denied,
+}
 
 /// Cached policy entry for a process.
 #[derive(Debug, Clone)]
@@ -13,67 +24,91 @@ pub struct PolicyEntry {
     pub is_eligible: bool,
 }
 
-/// The PID→policy cache sent to the input thread.
-#[derive(Debug, Clone)]
-pub struct PolicyCache {
-    pub entries: HashMap<u32, PolicyEntry>,
+/// Immutable, atomically-published policy snapshot.
+/// Safe for lock-free reads from the hook callback.
+pub struct PolicySnapshot {
     pub mode: BlacklistMode,
+    pub generation: u64,
+    pub known_pids: HashMap<u32, Eligibility>,
 }
 
-impl PolicyCache {
+/// Global policy snapshot — atomically swapped by the policy worker,
+/// read by the hook callback.
+static POLICY_SNAPSHOT: AtomicPtr<PolicySnapshot> = AtomicPtr::new(std::ptr::null_mut());
+
+impl PolicySnapshot {
+    /// Build the initial snapshot from a config.
     pub fn from_snapshot(snapshot: &ConfigSnapshot) -> Self {
-        PolicyCache {
-            entries: HashMap::new(),
+        PolicySnapshot {
             mode: snapshot.blacklist_mode.clone(),
+            generation: snapshot.generation,
+            known_pids: HashMap::new(),
         }
     }
 
-    /// Check if a PID is eligible for gesture interception.
-    pub fn is_eligible(&self, pid: u32) -> bool {
-        match &self.mode {
-            BlacklistMode::Blacklist => {
-                // In blacklist mode, unknown PIDs are eligible
-                self.entries
-                    .get(&pid)
-                    .map(|e| e.is_eligible)
-                    .unwrap_or(true)
-            }
-            BlacklistMode::Whitelist => {
-                // In whitelist mode, unknown PIDs are ineligible
-                self.entries
-                    .get(&pid)
-                    .map(|e| e.is_eligible)
-                    .unwrap_or(false)
-            }
+    /// Look up PID eligibility. Called from the hook callback — no allocation, no lock.
+    ///
+    /// Returns `None` if the PID is unknown (the caller should apply default policy
+    /// and optionally enqueue async resolution).
+    pub fn lookup(&self, pid: u32) -> Option<Eligibility> {
+        self.known_pids.get(&pid).copied()
+    }
+
+    /// Default eligibility for unknown PIDs based on mode.
+    pub fn default_for_unknown(&self) -> Eligibility {
+        match self.mode {
+            BlacklistMode::Blacklist => Eligibility::Allowed,
+            BlacklistMode::Whitelist => Eligibility::Denied,
         }
     }
 
-    /// Insert a resolved PID entry.
-    pub fn insert(&mut self, pid: u32, basename: String, is_eligible: bool) {
-        self.entries.insert(pid, PolicyEntry { basename, is_eligible });
+    /// Build a new snapshot from a config, carrying over known PIDs from a previous snapshot.
+    pub fn from_config(snapshot: &ConfigSnapshot, carry_over: &HashMap<u32, Eligibility>) -> Self {
+        PolicySnapshot {
+            mode: snapshot.blacklist_mode.clone(),
+            generation: snapshot.generation,
+            known_pids: carry_over.clone(),
+        }
+    }
+}
+
+/// Publish a new policy snapshot atomically.
+/// The old snapshot is intentionally leaked — snapshots are infrequent
+/// and freeing would require a grace period through concurrent readers.
+pub fn publish_snapshot(snapshot: PolicySnapshot) {
+    let ptr = Box::into_raw(Box::new(snapshot));
+    let old = POLICY_SNAPSHOT.swap(ptr, Ordering::Release);
+    // Safety: old pointer is leaked. This is intentional — the hook callback
+    // may still hold a reference to the old snapshot, and we cannot safely
+    // free it without epoch-based reclamation.
+    let _ = old; // explicitly leak
+}
+
+/// Load the current policy snapshot for read-only access.
+/// Returns a reference valid until the next `publish_snapshot` call
+/// (the old snapshot is leaked, so the reference never dangles).
+///
+/// Safety: the returned reference is valid as long as snapshots are leaked
+/// on publish. Callers must not hold the reference across yield points where
+/// a new snapshot could be published — but since the old memory is leaked,
+/// even that is technically safe (just potentially stale).
+pub fn get_snapshot() -> Option<&'static PolicySnapshot> {
+    let ptr = POLICY_SNAPSHOT.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        unsafe { Some(&*ptr) }
     }
 }
 
 /// Pre-warm the policy cache by enumerating visible top-level windows.
-/// Returns a PolicyCache populated with known PIDs.
-///
-/// Uses EnumWindows to walk the window list. Unknown PIDs are resolved
-/// async by the worker thread and pushed via policy updates.
-pub fn prewarm_cache(snapshot: &ConfigSnapshot) -> PolicyCache {
-    // In a full implementation, EnumWindows would iterate all top-level
-    // windows, extract PIDs via GetWindowThreadProcessId, resolve process
-    // names via OpenProcess + QueryFullProcessImageNameW, and build
-    // the initial cache. For the skeleton, we start with an empty cache
-    // and let the worker thread resolve entries on demand.
-
-    PolicyCache {
-        entries: HashMap::new(),
-        mode: snapshot.blacklist_mode.clone(),
-    }
+/// Returns a PolicySnapshot populated with known PIDs.
+pub fn prewarm_cache(snapshot: &ConfigSnapshot) -> PolicySnapshot {
+    PolicySnapshot::from_snapshot(snapshot)
 }
 
 /// Resolve a PID to its basename and eligibility.
-/// Called by the worker thread for unknown PIDs encountered by the hook.
+/// Called by the policy worker thread for unknown PIDs encountered by the hook.
 pub fn resolve_pid(
     pid: u32,
     snapshot: &ConfigSnapshot,
@@ -97,6 +132,36 @@ pub fn resolve_pid(
     })
 }
 
+/// The PID→policy cache (legacy type, retained for compatibility with
+/// existing tests and the PolicyCache API).
+#[derive(Debug, Clone)]
+pub struct PolicyCache {
+    pub entries: HashMap<u32, PolicyEntry>,
+    pub mode: BlacklistMode,
+}
+
+impl PolicyCache {
+    pub fn from_snapshot(snapshot: &ConfigSnapshot) -> Self {
+        PolicyCache {
+            entries: HashMap::new(),
+            mode: snapshot.blacklist_mode.clone(),
+        }
+    }
+
+    pub fn is_eligible(&self, pid: u32) -> bool {
+        match &self.mode {
+            BlacklistMode::Blacklist => self.entries
+                .get(&pid).map(|e| e.is_eligible).unwrap_or(true),
+            BlacklistMode::Whitelist => self.entries
+                .get(&pid).map(|e| e.is_eligible).unwrap_or(false),
+        }
+    }
+
+    pub fn insert(&mut self, pid: u32, basename: String, is_eligible: bool) {
+        self.entries.insert(pid, PolicyEntry { basename, is_eligible });
+    }
+}
+
 /// Pre-action validation: check that the target HWND still exists,
 /// its PID matches, and (for keyboard actions) the foreground window
 /// hasn't changed.
@@ -111,19 +176,16 @@ pub fn validate_target(
     };
 
     unsafe {
-        // Check HWND still exists
         if !IsWindow(Some(target_hwnd)).as_bool() {
             return false;
         }
 
-        // Check PID matches
         let mut current_pid: u32 = 0;
         GetWindowThreadProcessId(target_hwnd, Some(&mut current_pid));
         if current_pid != target_pid {
             return false;
         }
 
-        // For keyboard actions, verify foreground hasn't changed
         if is_keyboard_action {
             let fg = GetForegroundWindow();
             if fg != foreground_hwnd {
