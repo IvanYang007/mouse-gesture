@@ -5,14 +5,12 @@
 use anyhow::Result;
 use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
-    MonitorFromPoint, GetMonitorInfoW, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    EnumDisplayMonitors, HMONITOR, HDC,
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, HDC, HMONITOR, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    ShowWindowAsync, PostMessageW,
-    SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE,
-    WM_CLOSE,
+    PostMessageW, ShowWindowAsync, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
 };
 
 /// A monitor descriptor used for tiling calculations.
@@ -40,7 +38,9 @@ pub fn enumerate_monitors() -> Result<Vec<MonitorInfo>> {
     }
 
     monitors.sort_by(|a: &MonitorInfo, b: &MonitorInfo| {
-        a.rect.left.cmp(&b.rect.left)
+        a.rect
+            .left
+            .cmp(&b.rect.left)
             .then(a.rect.top.cmp(&b.rect.top))
     });
 
@@ -95,8 +95,14 @@ pub fn monitor_from_point(x: i32, y: i32) -> isize {
 /// Snap position for window tiling.
 #[derive(Debug, Clone, Copy)]
 pub enum SnapPosition {
-    Left, Right, Top, Bottom,
-    TopLeft, TopRight, BottomLeft, BottomRight,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
     Center,
 }
 
@@ -108,36 +114,52 @@ pub fn snap_rect(monitor: &MonitorInfo, position: SnapPosition) -> RECT {
 
     match position {
         SnapPosition::Left => RECT {
-            left: work.left, top: work.top,
-            right: work.left + w / 2, bottom: work.bottom,
+            left: work.left,
+            top: work.top,
+            right: work.left + w / 2,
+            bottom: work.bottom,
         },
         SnapPosition::Right => RECT {
-            left: work.left + w / 2, top: work.top,
-            right: work.right, bottom: work.bottom,
+            left: work.left + w / 2,
+            top: work.top,
+            right: work.right,
+            bottom: work.bottom,
         },
         SnapPosition::Top => RECT {
-            left: work.left, top: work.top,
-            right: work.right, bottom: work.top + h / 2,
+            left: work.left,
+            top: work.top,
+            right: work.right,
+            bottom: work.top + h / 2,
         },
         SnapPosition::Bottom => RECT {
-            left: work.left, top: work.top + h / 2,
-            right: work.right, bottom: work.bottom,
+            left: work.left,
+            top: work.top + h / 2,
+            right: work.right,
+            bottom: work.bottom,
         },
         SnapPosition::TopLeft => RECT {
-            left: work.left, top: work.top,
-            right: work.left + w / 2, bottom: work.top + h / 2,
+            left: work.left,
+            top: work.top,
+            right: work.left + w / 2,
+            bottom: work.top + h / 2,
         },
         SnapPosition::TopRight => RECT {
-            left: work.left + w / 2, top: work.top,
-            right: work.right, bottom: work.top + h / 2,
+            left: work.left + w / 2,
+            top: work.top,
+            right: work.right,
+            bottom: work.top + h / 2,
         },
         SnapPosition::BottomLeft => RECT {
-            left: work.left, top: work.top + h / 2,
-            right: work.left + w / 2, bottom: work.bottom,
+            left: work.left,
+            top: work.top + h / 2,
+            right: work.left + w / 2,
+            bottom: work.bottom,
         },
         SnapPosition::BottomRight => RECT {
-            left: work.left + w / 2, top: work.top + h / 2,
-            right: work.right, bottom: work.bottom,
+            left: work.left + w / 2,
+            top: work.top + h / 2,
+            right: work.right,
+            bottom: work.bottom,
         },
         SnapPosition::Center => {
             let cw = (w as f64 * 0.8) as i32;
@@ -155,9 +177,15 @@ pub fn snap_rect(monitor: &MonitorInfo, position: SnapPosition) -> RECT {
 /// Execute a window management command.
 pub fn execute_window_command(hwnd: HWND, command: &str) -> Result<()> {
     match command {
-        "maximize" => unsafe { ShowWindowAsync(hwnd, SW_MAXIMIZE); },
-        "minimize" => unsafe { ShowWindowAsync(hwnd, SW_MINIMIZE); },
-        "restore" => unsafe { ShowWindowAsync(hwnd, SW_RESTORE); },
+        "maximize" => unsafe {
+            ShowWindowAsync(hwnd, SW_MAXIMIZE);
+        },
+        "minimize" => unsafe {
+            ShowWindowAsync(hwnd, SW_MINIMIZE);
+        },
+        "restore" => unsafe {
+            ShowWindowAsync(hwnd, SW_RESTORE);
+        },
         "close" => unsafe {
             PostMessageW(
                 Some(hwnd),

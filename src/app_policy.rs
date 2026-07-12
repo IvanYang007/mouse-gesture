@@ -109,10 +109,7 @@ pub fn prewarm_cache(snapshot: &ConfigSnapshot) -> PolicySnapshot {
 
 /// Resolve a PID to its basename and eligibility.
 /// Called by the policy worker thread for unknown PIDs encountered by the hook.
-pub fn resolve_pid(
-    pid: u32,
-    snapshot: &ConfigSnapshot,
-) -> Option<PolicyEntry> {
+pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
     // In a full implementation:
     // 1. OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
     // 2. QueryFullProcessImageNameW
@@ -150,15 +147,27 @@ impl PolicyCache {
 
     pub fn is_eligible(&self, pid: u32) -> bool {
         match &self.mode {
-            BlacklistMode::Blacklist => self.entries
-                .get(&pid).map(|e| e.is_eligible).unwrap_or(true),
-            BlacklistMode::Whitelist => self.entries
-                .get(&pid).map(|e| e.is_eligible).unwrap_or(false),
+            BlacklistMode::Blacklist => self
+                .entries
+                .get(&pid)
+                .map(|e| e.is_eligible)
+                .unwrap_or(true),
+            BlacklistMode::Whitelist => self
+                .entries
+                .get(&pid)
+                .map(|e| e.is_eligible)
+                .unwrap_or(false),
         }
     }
 
     pub fn insert(&mut self, pid: u32, basename: String, is_eligible: bool) {
-        self.entries.insert(pid, PolicyEntry { basename, is_eligible });
+        self.entries.insert(
+            pid,
+            PolicyEntry {
+                basename,
+                is_eligible,
+            },
+        );
     }
 }
 

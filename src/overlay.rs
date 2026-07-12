@@ -4,33 +4,20 @@
 
 use crate::config::Direction;
 use anyhow::Result;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM, COLORREF};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, DeleteDC, DeleteObject,
-    CreateDIBSection, SelectObject, GetDC, ReleaseDC,
-    SetTextColor, SetBkMode,
-    PatBlt, DrawTextW, CreateFontW,
-    BLENDFUNCTION, AC_SRC_ALPHA,
-    DIB_RGB_COLORS,
-    BITMAPINFO, BITMAPINFOHEADER,
-    BLACKNESS, TRANSPARENT,
-    HDC, HBITMAP, HFONT,
-    DT_CENTER, DT_VCENTER, DT_SINGLELINE, DT_NOCLIP,
-    FONT_OUTPUT_PRECISION, FONT_CLIP_PRECISION,
-    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-    FONT_CHARSET, FONT_QUALITY,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDC,
+    PatBlt, ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA, BITMAPINFO,
+    BITMAPINFOHEADER, BLACKNESS, BLENDFUNCTION, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_QUALITY, DIB_RGB_COLORS, DT_CENTER, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER, FONT_CHARSET,
+    FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, HBITMAP, HDC, HFONT,
+    OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW,
-    ShowWindow, UpdateLayeredWindow,
-    CS_HREDRAW, CS_VREDRAW,
-    WS_EX_LAYERED, WS_EX_TRANSPARENT, WS_EX_TOPMOST,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_POPUP, SW_HIDE, SW_SHOWNOACTIVATE,
-    WNDCLASSEXW,
-    GetSystemMetrics, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    ULW_ALPHA,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, RegisterClassExW, ShowWindow,
+    UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WNDCLASSEXW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 const OVERLAY_CLASS: &str = "MouseGestureOverlay\0";
@@ -66,13 +53,22 @@ impl OverlayWindow {
 
         let hwnd = unsafe {
             CreateWindowExW(
-                WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST
-                | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                WS_EX_LAYERED
+                    | WS_EX_TRANSPARENT
+                    | WS_EX_TOPMOST
+                    | WS_EX_NOACTIVATE
+                    | WS_EX_TOOLWINDOW,
                 windows::core::PCWSTR::from_raw(name.as_ptr()),
                 windows::core::w!(""),
                 WS_POPUP,
-                x, y, w, h,
-                None, None, None, None,
+                x,
+                y,
+                w,
+                h,
+                None,
+                None,
+                None,
+                None,
             )?
         };
 
@@ -93,7 +89,12 @@ impl OverlayWindow {
 
         unsafe { ShowWindow(hwnd, SW_HIDE) };
 
-        Ok(OverlayWindow { hwnd, hdc, bitmap, font })
+        Ok(OverlayWindow {
+            hwnd,
+            hdc,
+            bitmap,
+            font,
+        })
     }
 
     fn create_bitmap(hdc: HDC) -> Result<HBITMAP> {
@@ -115,18 +116,27 @@ impl OverlayWindow {
         };
 
         let mut bits: *mut std::ffi::c_void = std::ptr::null_mut();
-        unsafe {
-            CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0)
-        }.map_err(|e| anyhow::anyhow!("CreateDIBSection: {:?}", e))
+        unsafe { CreateDIBSection(Some(hdc), &bmi, DIB_RGB_COLORS, &mut bits, None, 0) }
+            .map_err(|e| anyhow::anyhow!("CreateDIBSection: {:?}", e))
     }
 
     fn create_font() -> HFONT {
         let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
         unsafe {
             CreateFontW(
-                FONT_SIZE, 0, 0, 0, 700, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, 0,
+                FONT_SIZE,
+                0,
+                0,
+                0,
+                700,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY,
+                0,
                 windows::core::PCWSTR::from_raw(face.as_ptr()),
             )
         }
@@ -134,39 +144,69 @@ impl OverlayWindow {
 
     pub fn show_direction(&self, direction: Direction, cursor_x: i32, cursor_y: i32) {
         let label: &str = match direction {
-            Direction::N => "U", Direction::NE => "UR",
-            Direction::E => "R", Direction::SE => "DR",
-            Direction::S => "D", Direction::SW => "DL",
-            Direction::W => "L", Direction::NW => "UL",
+            Direction::N => "U",
+            Direction::NE => "UR",
+            Direction::E => "R",
+            Direction::SE => "DR",
+            Direction::S => "D",
+            Direction::SW => "DL",
+            Direction::W => "L",
+            Direction::NW => "UL",
         };
 
         let mut label_wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
 
         unsafe {
             PatBlt(self.hdc, 0, 0, OVERLAY_W, OVERLAY_H, BLACKNESS);
-            let mut rect = RECT { left: 0, top: 0, right: OVERLAY_W, bottom: OVERLAY_H };
-            DrawTextW(self.hdc, &mut label_wide, &mut rect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: OVERLAY_W,
+                bottom: OVERLAY_H,
+            };
+            DrawTextW(
+                self.hdc,
+                &mut label_wide,
+                &mut rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP,
+            );
 
             let screen_dc = GetDC(None);
-            let pos = POINT { x: cursor_x - OVERLAY_W / 2, y: cursor_y - OVERLAY_H - 20 };
-            let size = windows::Win32::Foundation::SIZE { cx: OVERLAY_W, cy: OVERLAY_H };
+            let pos = POINT {
+                x: cursor_x - OVERLAY_W / 2,
+                y: cursor_y - OVERLAY_H - 20,
+            };
+            let size = windows::Win32::Foundation::SIZE {
+                cx: OVERLAY_W,
+                cy: OVERLAY_H,
+            };
             let pt_src = POINT { x: 0, y: 0 };
             let blend = BLENDFUNCTION {
-                BlendOp: AC_SRC_ALPHA as u8, BlendFlags: 0,
-                SourceConstantAlpha: OVERLAY_ALPHA, AlphaFormat: AC_SRC_ALPHA as u8,
+                BlendOp: AC_SRC_ALPHA as u8,
+                BlendFlags: 0,
+                SourceConstantAlpha: OVERLAY_ALPHA,
+                AlphaFormat: AC_SRC_ALPHA as u8,
             };
 
             let _ = UpdateLayeredWindow(
-                self.hwnd, Some(screen_dc), Some(&pos), Some(&size),
-                Some(self.hdc), Some(&pt_src), COLORREF(0), Some(&blend), ULW_ALPHA,
+                self.hwnd,
+                Some(screen_dc),
+                Some(&pos),
+                Some(&size),
+                Some(self.hdc),
+                Some(&pt_src),
+                COLORREF(0),
+                Some(&blend),
+                ULW_ALPHA,
             );
             ReleaseDC(None, screen_dc);
             ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
     }
 
-    pub fn hide(&self) { unsafe { ShowWindow(self.hwnd, SW_HIDE) }; }
+    pub fn hide(&self) {
+        unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+    }
 
     pub fn destroy(&self) {
         unsafe {
@@ -179,7 +219,10 @@ impl OverlayWindow {
 }
 
 unsafe extern "system" fn overlay_proc(
-    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
 ) -> LRESULT {
     DefWindowProcW(hwnd, msg, wparam, lparam)
 }

@@ -1,24 +1,23 @@
 //! Input hook thread — owns WH_MOUSE_LL, the message pump,
 //! and the gesture buffer.
 
+use crate::app_policy::{self, Eligibility};
 use crate::config::ConfigSnapshot;
 use crate::config::Direction;
-use crate::gesture::{GestureBuffer, GestureResult, Point, classify, direction_from_points, MAX_POINTS};
-use crate::state_machine::{DownResult, GestureContext, StateMachine, UpResult};
+use crate::gesture::{
+    classify, direction_from_points, GestureBuffer, GestureResult, Point, MAX_POINTS,
+};
 pub use crate::state_machine::SELF_TAG;
-use crate::app_policy::{self, Eligibility};
+use crate::state_machine::{DownResult, GestureContext, StateMachine, UpResult};
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, PeekMessageW, PostThreadMessageW,
-    SetWindowsHookExW, UnhookWindowsHookEx,
-    HOOKPROC, MSG, MSLLHOOKSTRUCT, GetForegroundWindow,
-    WH_MOUSE_LL, WM_MOUSEMOVE, WM_USER,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, PM_NOREMOVE,
-    LLMHF_INJECTED,
+    CallNextHookEx, GetForegroundWindow, GetMessageW, PeekMessageW, PostThreadMessageW,
+    SetWindowsHookExW, UnhookWindowsHookEx, HOOKPROC, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT,
+    PM_NOREMOVE, WH_MOUSE_LL, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_USER,
 };
 
 /// Custom messages posted to the hook thread's message queue.
@@ -28,11 +27,28 @@ pub const WM_HOOK_SHUTDOWN: u32 = WM_USER + 2;
 /// Event sent from the hook thread to the UI thread.
 #[derive(Debug, Clone)]
 pub enum HookEvent {
-    GestureStarted { x: i32, y: i32, monitor: isize },
-    TrailPoint { x: i32, y: i32 },
-    GestureEnded { matched: bool, gesture_name: Option<String>, target_hwnd: isize },
-    DirectionChanged { direction: Direction, x: i32, y: i32 },
-    PatternCaptured { directions: Vec<Direction> },
+    GestureStarted {
+        x: i32,
+        y: i32,
+        monitor: isize,
+    },
+    TrailPoint {
+        x: i32,
+        y: i32,
+    },
+    GestureEnded {
+        matched: bool,
+        gesture_name: Option<String>,
+        target_hwnd: isize,
+    },
+    DirectionChanged {
+        direction: Direction,
+        x: i32,
+        y: i32,
+    },
+    PatternCaptured {
+        directions: Vec<Direction>,
+    },
     Error(String),
 }
 
@@ -88,7 +104,9 @@ pub struct HookController {
 
 impl HookController {
     pub fn send(&self, command: HookCommand) -> std::result::Result<(), String> {
-        self.cmd_tx.send(command).map_err(|e| format!("cmd send: {}", e))?;
+        self.cmd_tx
+            .send(command)
+            .map_err(|e| format!("cmd send: {}", e))?;
         if self.hook_thread_id != 0 {
             unsafe {
                 let ret = PostThreadMessageW(
@@ -113,8 +131,13 @@ pub fn spawn_hook_thread(
     sample_distance: i32,
     ui_hwnd_raw: isize,
 ) -> (
-    thread::JoinHandle<()>, thread::JoinHandle<()>, thread::JoinHandle<()>, thread::JoinHandle<()>,
-    Arc<HookShared>, HookController, std::sync::mpsc::Receiver<HookEvent>,
+    thread::JoinHandle<()>,
+    thread::JoinHandle<()>,
+    thread::JoinHandle<()>,
+    thread::JoinHandle<()>,
+    Arc<HookShared>,
+    HookController,
+    std::sync::mpsc::Receiver<HookEvent>,
 ) {
     let shared = Arc::new(HookShared {
         shutdown: AtomicBool::new(false),
@@ -142,25 +165,35 @@ pub fn spawn_hook_thread(
     let event_tx_recog = event_tx.clone();
 
     // ── Hook thread ────────────────────────────────────────────
-    let hook_handle = thread::Builder::new().name("mouse-hook".into())
+    let hook_handle = thread::Builder::new()
+        .name("mouse-hook".into())
         .spawn(move || {
             let ui_hwnd = HWND(ui_hwnd_raw as *mut _);
             init_hook_state(activation_threshold, sample_distance);
             let hook_proc = create_hook_proc(
-                event_tx.clone(), completion_tx, replay_tx, policy_tx,
-                shared_hook.clone(), ui_hwnd,
+                event_tx.clone(),
+                completion_tx,
+                replay_tx,
+                policy_tx,
+                shared_hook.clone(),
+                ui_hwnd,
             );
 
             // Create thread message queue before publishing thread ID
             let mut msg = MSG::default();
-            unsafe { PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE); }
+            unsafe {
+                PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
+            }
             let thread_id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
             let _ = ready_tx.send(thread_id);
 
             let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, hook_proc, None, 0) };
             let hook = match hook {
                 Ok(h) => h,
-                Err(e) => { log::error!("SetWindowsHookExW failed: {:?}", e); return; }
+                Err(e) => {
+                    log::error!("SetWindowsHookExW failed: {:?}", e);
+                    return;
+                }
             };
 
             shared_hook.ready.store(true, Ordering::SeqCst);
@@ -168,7 +201,9 @@ pub fn spawn_hook_thread(
 
             loop {
                 let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
-                if ret.0 == 0 || ret.0 == -1 { break; }
+                if ret.0 == 0 || ret.0 == -1 {
+                    break;
+                }
 
                 match msg.message {
                     WM_HOOK_COMMAND => {
@@ -188,16 +223,21 @@ pub fn spawn_hook_thread(
                 process_hook_command(cmd, &shared_hook);
             }
 
-            unsafe { let _ = UnhookWindowsHookEx(hook); }
+            unsafe {
+                let _ = UnhookWindowsHookEx(hook);
+            }
             log::info!("Hook thread shut down");
         })
         .expect("spawn hook thread");
 
     // ── Recognition worker ──────────────────────────────────────
-    let recog_handle = thread::Builder::new().name("mouse-recognize".into())
+    let recog_handle = thread::Builder::new()
+        .name("mouse-recognize".into())
         .spawn(move || {
             while let Ok(completion) = completion_rx.recv() {
-                if shared_recog.shutdown.load(Ordering::Relaxed) { break; }
+                if shared_recog.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
 
                 // Reconstruct buffer from completion packet
                 let mut buf = GestureBuffer::new(2);
@@ -223,13 +263,15 @@ pub fn spawn_hook_thread(
                 match classification {
                     GestureResult::Matched { name, .. } => {
                         let _ = event_tx_recog.send(HookEvent::GestureEnded {
-                            matched: true, gesture_name: Some(name),
+                            matched: true,
+                            gesture_name: Some(name),
                             target_hwnd: completion.target_hwnd,
                         });
                     }
                     _ => {
                         let _ = event_tx_recog.send(HookEvent::GestureEnded {
-                            matched: false, gesture_name: None,
+                            matched: false,
+                            gesture_name: None,
                             target_hwnd: completion.target_hwnd,
                         });
                     }
@@ -243,10 +285,13 @@ pub fn spawn_hook_thread(
         .expect("spawn recognition worker");
 
     // ── Click replay worker ─────────────────────────────────────
-    let replay_handle = thread::Builder::new().name("mouse-replay".into())
+    let replay_handle = thread::Builder::new()
+        .name("mouse-replay".into())
         .spawn(move || {
             while let Ok(replay) = replay_rx.recv() {
-                if shared_replay.shutdown.load(Ordering::Relaxed) { break; }
+                if shared_replay.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
                 inject_synthetic_click(replay.release_point);
             }
             log::info!("Replay worker shut down");
@@ -254,10 +299,13 @@ pub fn spawn_hook_thread(
         .expect("spawn replay worker");
 
     // ── Policy worker ──────────────────────────────────────────
-    let policy_handle = thread::Builder::new().name("policy-resolver".into())
+    let policy_handle = thread::Builder::new()
+        .name("policy-resolver".into())
         .spawn(move || {
             while let Ok(req) = policy_rx.recv() {
-                if shared_policy.shutdown.load(Ordering::Relaxed) { break; }
+                if shared_policy.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
 
                 let snapshot = app_policy::get_snapshot();
                 if let Some(current) = snapshot {
@@ -268,11 +316,24 @@ pub fn spawn_hook_thread(
                         known_pids: current.known_pids.clone(),
                     };
                     if let Some(entry) = entry {
-                        let eligibility = if entry.is_eligible { Eligibility::Allowed } else { Eligibility::Denied };
-                        let changed = new_snapshot.known_pids.insert(req.pid, eligibility) != Some(eligibility);
+                        let eligibility = if entry.is_eligible {
+                            Eligibility::Allowed
+                        } else {
+                            Eligibility::Denied
+                        };
+                        let changed = new_snapshot.known_pids.insert(req.pid, eligibility)
+                            != Some(eligibility);
                         if changed {
-                            log::debug!("Policy: PID {} -> {} ({})", req.pid, entry.basename,
-                                if entry.is_eligible { "allowed" } else { "denied" });
+                            log::debug!(
+                                "Policy: PID {} -> {} ({})",
+                                req.pid,
+                                entry.basename,
+                                if entry.is_eligible {
+                                    "allowed"
+                                } else {
+                                    "denied"
+                                }
+                            );
                             app_policy::publish_snapshot(new_snapshot);
                         }
                     }
@@ -283,9 +344,20 @@ pub fn spawn_hook_thread(
         .expect("spawn policy worker");
 
     let hook_thread_id = ready_rx.recv().expect("hook thread not ready");
-    let controller = HookController { cmd_tx, hook_thread_id };
+    let controller = HookController {
+        cmd_tx,
+        hook_thread_id,
+    };
 
-    (hook_handle, recog_handle, replay_handle, policy_handle, shared, controller, event_rx)
+    (
+        hook_handle,
+        recog_handle,
+        replay_handle,
+        policy_handle,
+        shared,
+        controller,
+        event_rx,
+    )
 }
 
 /// Process a single hook command (called from the hook thread).
@@ -295,36 +367,48 @@ fn process_hook_command(cmd: HookCommand, shared: &HookShared) {
             shared.shutdown.store(true, Ordering::SeqCst);
             let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
             unsafe {
-                let _ = PostThreadMessageW(tid, WM_HOOK_SHUTDOWN, WPARAM::default(), LPARAM::default());
+                let _ =
+                    PostThreadMessageW(tid, WM_HOOK_SHUTDOWN, WPARAM::default(), LPARAM::default());
             }
         }
         HookCommand::UpdateConfig(snapshot) => {
             let n = snapshot.gestures.len();
-            HOOK_CONFIG.with(|c| { *c.borrow_mut() = Some(snapshot); });
+            HOOK_CONFIG.with(|c| {
+                *c.borrow_mut() = Some(snapshot);
+            });
             log::info!("Hook config updated: {} gestures", n);
         }
         HookCommand::SetInterception(enabled) => {
             shared.interception_enabled.store(enabled, Ordering::SeqCst);
-            HOOK_INTERCEPTION_ENABLED.with(|c| { *c.borrow_mut() = enabled; });
+            HOOK_INTERCEPTION_ENABLED.with(|c| {
+                *c.borrow_mut() = enabled;
+            });
             log::info!("Hook interception: {}", if enabled { "ON" } else { "OFF" });
         }
         HookCommand::ForceReset => {
             // State-aware reset: only if button not physically held,
             // or during shutdown/session-lock.
             let can_reset = HOOK_STATE_MACHINE.with(|sm| {
-                sm.borrow().as_ref().map(|s| {
-                    !s.physical_button_down
-                        || shared.shutdown.load(Ordering::Relaxed)
-                        || !shared.interception_enabled.load(Ordering::Relaxed)
-                }).unwrap_or(true)
+                sm.borrow()
+                    .as_ref()
+                    .map(|s| {
+                        !s.physical_button_down
+                            || shared.shutdown.load(Ordering::Relaxed)
+                            || !shared.interception_enabled.load(Ordering::Relaxed)
+                    })
+                    .unwrap_or(true)
             });
 
             if can_reset {
                 HOOK_STATE_MACHINE.with(|sm| {
-                    if let Some(ref mut sm) = *sm.borrow_mut() { sm.force_reset(); }
+                    if let Some(ref mut sm) = *sm.borrow_mut() {
+                        sm.force_reset();
+                    }
                 });
                 HOOK_BUFFER.with(|buf| {
-                    if let Some(ref mut b) = *buf.borrow_mut() { b.clear(); }
+                    if let Some(ref mut b) = *buf.borrow_mut() {
+                        b.clear();
+                    }
                 });
                 HOOK_LAST_DIRECTION.with(|c| c.set(8));
             }
@@ -357,29 +441,46 @@ fn create_hook_proc(
     shared: Arc<HookShared>,
     ui_hwnd: HWND,
 ) -> HOOKPROC {
-    HOOK_EVENT_TX.with(|c| { c.set(event_tx).expect("HOOK_EVENT_TX"); });
-    HOOK_COMPLETION_TX.with(|c| { c.set(completion_tx).expect("HOOK_COMPLETION_TX"); });
-    HOOK_REPLAY_TX.with(|c| { c.set(replay_tx).expect("HOOK_REPLAY_TX"); });
-    HOOK_POLICY_QUEUE.with(|c| { c.set(policy_queue).expect("HOOK_POLICY_QUEUE"); });
+    HOOK_EVENT_TX.with(|c| {
+        c.set(event_tx).expect("HOOK_EVENT_TX");
+    });
+    HOOK_COMPLETION_TX.with(|c| {
+        c.set(completion_tx).expect("HOOK_COMPLETION_TX");
+    });
+    HOOK_REPLAY_TX.with(|c| {
+        c.set(replay_tx).expect("HOOK_REPLAY_TX");
+    });
+    HOOK_POLICY_QUEUE.with(|c| {
+        c.set(policy_queue).expect("HOOK_POLICY_QUEUE");
+    });
     HOOK_INTERCEPTION_ENABLED.with(|c| {
         *c.borrow_mut() = shared.interception_enabled.load(Ordering::Relaxed);
     });
-    HOOK_UI_HWND.with(|c| { c.set(ui_hwnd.0 as isize); });
+    HOOK_UI_HWND.with(|c| {
+        c.set(ui_hwnd.0 as isize);
+    });
     Some(low_level_mouse_proc)
 }
 
 /// Send an event to the UI thread and wake its message pump.
 fn post_event(event: HookEvent) {
     HOOK_EVENT_TX.with(|tx| {
-        if let Some(tx) = tx.get() { let _ = tx.send(event); }
+        if let Some(tx) = tx.get() {
+            let _ = tx.send(event);
+        }
     });
     HOOK_UI_HWND.with(|c| {
         let hwnd = c.get();
         if hwnd != 0 {
             unsafe {
-                use windows::Win32::Foundation::{WPARAM, LPARAM};
+                use windows::Win32::Foundation::{LPARAM, WPARAM};
                 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-                let _ = PostMessageW(Some(HWND(hwnd as *mut _)), 0x8002, WPARAM::default(), LPARAM::default());
+                let _ = PostMessageW(
+                    Some(HWND(hwnd as *mut _)),
+                    0x8002,
+                    WPARAM::default(),
+                    LPARAM::default(),
+                );
             }
         }
     });
@@ -387,18 +488,29 @@ fn post_event(event: HookEvent) {
 
 /// Wake the UI thread message pump (used by recognition/replay workers).
 fn post_ui_wake(ui_hwnd_raw: isize) {
-    if ui_hwnd_raw == 0 { return; }
+    if ui_hwnd_raw == 0 {
+        return;
+    }
     unsafe {
-        use windows::Win32::Foundation::{WPARAM, LPARAM};
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
         use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-        let _ = PostMessageW(Some(HWND(ui_hwnd_raw as *mut _)), 0x8002, WPARAM::default(), LPARAM::default());
+        let _ = PostMessageW(
+            Some(HWND(ui_hwnd_raw as *mut _)),
+            0x8002,
+            WPARAM::default(),
+            LPARAM::default(),
+        );
     }
 }
 
 unsafe extern "system" fn low_level_mouse_proc(
-    code: i32, wparam: WPARAM, lparam: LPARAM,
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
 ) -> LRESULT {
-    if code < 0 { return CallNextHookEx(None, code, wparam, lparam); }
+    if code < 0 {
+        return CallNextHookEx(None, code, wparam, lparam);
+    }
     if !HOOK_INTERCEPTION_ENABLED.with(|c| *c.borrow()) {
         return CallNextHookEx(None, code, wparam, lparam);
     }
@@ -417,7 +529,10 @@ fn process_mouse_event(_code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let is_move = msg == WM_MOUSEMOVE;
 
     let in_gesture = HOOK_STATE_MACHINE.with(|sm| {
-        sm.borrow().as_ref().map(|s| s.state != crate::state_machine::State::Idle).unwrap_or(false)
+        sm.borrow()
+            .as_ref()
+            .map(|s| s.state != crate::state_machine::State::Idle)
+            .unwrap_or(false)
     });
 
     if !is_right && !(is_move && in_gesture) {
@@ -454,8 +569,12 @@ fn process_mouse_event(_code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 // ── Right-button handlers ──────────────────────────────────────
 
 fn handle_right_down(
-    code: i32, wparam: WPARAM, lparam: LPARAM,
-    origin: InputOrigin, x: i32, y: i32,
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    origin: InputOrigin,
+    x: i32,
+    y: i32,
 ) -> LRESULT {
     if origin != InputOrigin::Physical {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -484,19 +603,24 @@ fn handle_right_down(
 
     let ctx = if is_eligible {
         Some(GestureContext {
-            target_hwnd, target_pid, foreground_hwnd,
+            target_hwnd,
+            target_pid,
+            foreground_hwnd,
             start_point: POINT { x, y },
-            origin_monitor: 0, origin_dpi: 96,
-            config_generation: HOOK_CONFIG.with(|c| {
-                c.borrow().as_ref().map(|cfg| cfg.generation).unwrap_or(0)
-            }),
+            origin_monitor: 0,
+            origin_dpi: 96,
+            config_generation: HOOK_CONFIG
+                .with(|c| c.borrow().as_ref().map(|cfg| cfg.generation).unwrap_or(0)),
         })
-    } else { None };
+    } else {
+        None
+    };
 
     // Caller already guarantees Physical origin — pass false for is_injected
     let result = HOOK_STATE_MACHINE.with(|sm| {
         let mut sm = sm.borrow_mut();
-        sm.as_mut().expect("HOOK_STATE_MACHINE not initialized")
+        sm.as_mut()
+            .expect("HOOK_STATE_MACHINE not initialized")
             .on_right_down(false, is_eligible, ctx)
     });
 
@@ -504,7 +628,9 @@ fn handle_right_down(
         DownResult::Consumed => {
             HOOK_BUFFER.with(|buf_cell| {
                 let mut buf = buf_cell.borrow_mut();
-                if let Some(ref mut b) = *buf { b.add_force(Point { x, y }); }
+                if let Some(ref mut b) = *buf {
+                    b.add_force(Point { x, y });
+                }
             });
             HOOK_LAST_DIRECTION.with(|c| c.set(8));
             LRESULT(1)
@@ -514,10 +640,12 @@ fn handle_right_down(
 }
 
 fn resolve_window_under_cursor(x: i32, y: i32) -> (HWND, u32) {
-    use windows::Win32::UI::WindowsAndMessaging::{WindowFromPoint, GetWindowThreadProcessId};
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, WindowFromPoint};
     unsafe {
         let hwnd = WindowFromPoint(POINT { x, y });
-        if hwnd.0.is_null() { return (HWND::default(), 0); }
+        if hwnd.0.is_null() {
+            return (HWND::default(), 0);
+        }
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         (hwnd, pid)
@@ -525,46 +653,66 @@ fn resolve_window_under_cursor(x: i32, y: i32) -> (HWND, u32) {
 }
 
 fn handle_right_up(
-    code: i32, wparam: WPARAM, lparam: LPARAM,
-    origin: InputOrigin, x: i32, y: i32,
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    origin: InputOrigin,
+    x: i32,
+    y: i32,
 ) -> LRESULT {
     // Foreign-injected up during physical capture: suppress it
     if origin != InputOrigin::Physical {
         let in_capture = HOOK_STATE_MACHINE.with(|sm| {
-            sm.borrow().as_ref().map(|s| s.physical_button_down).unwrap_or(false)
+            sm.borrow()
+                .as_ref()
+                .map(|s| s.physical_button_down)
+                .unwrap_or(false)
         });
-        if in_capture { return LRESULT(1); }
+        if in_capture {
+            return LRESULT(1);
+        }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
     let result = HOOK_STATE_MACHINE.with(|sm| {
         let mut sm = sm.borrow_mut();
-        sm.as_mut().expect("HOOK_STATE_MACHINE not initialized").on_right_up()
+        sm.as_mut()
+            .expect("HOOK_STATE_MACHINE not initialized")
+            .on_right_up()
     });
 
     match result {
         UpResult::ReplaySynthetic => {
             HOOK_LAST_DIRECTION.with(|c| c.set(8));
-            enqueue_replay(ClickReplay { release_point: Point { x, y } });
+            enqueue_replay(ClickReplay {
+                release_point: Point { x, y },
+            });
             LRESULT(1)
         }
         UpResult::GestureComplete => {
             HOOK_LAST_DIRECTION.with(|c| c.set(8));
 
             // Capture config generation for mismatch detection
-            let config_gen = HOOK_CONFIG.with(|c| {
-                c.borrow().as_ref().map(|cfg| cfg.generation).unwrap_or(0)
-            });
+            let config_gen =
+                HOOK_CONFIG.with(|c| c.borrow().as_ref().map(|cfg| cfg.generation).unwrap_or(0));
             let captured_gen = HOOK_STATE_MACHINE.with(|sm| {
-                sm.borrow().as_ref().map(|s| s.current_generation()).unwrap_or(0)
+                sm.borrow()
+                    .as_ref()
+                    .map(|s| s.current_generation())
+                    .unwrap_or(0)
             });
 
             // 0 sentinel = config changed mid-gesture
-            let completion_gen = if captured_gen != 0 && captured_gen != config_gen { 0 } else { captured_gen };
+            let completion_gen = if captured_gen != 0 && captured_gen != config_gen {
+                0
+            } else {
+                captured_gen
+            };
 
             // Capture target window for action dispatch (P0 focus routing fix)
             let target_hwnd = HOOK_STATE_MACHINE.with(|sm| {
-                sm.borrow().as_ref()
+                sm.borrow()
+                    .as_ref()
                     .and_then(|s| s.context.as_ref().map(|c| c.target_hwnd.0 as isize))
                     .unwrap_or(0)
             });
@@ -574,7 +722,11 @@ fn handle_right_up(
             let (patterns, rdp_epsilon_sq, min_gesture_length) = HOOK_CONFIG.with(|c| {
                 let cfg = c.borrow();
                 let cfg = cfg.as_ref().expect("HOOK_CONFIG not initialized");
-                (Arc::new(cfg.gestures.clone()), cfg.rdp_epsilon_sq, cfg.min_gesture_length)
+                (
+                    Arc::new(cfg.gestures.clone()),
+                    cfg.rdp_epsilon_sq,
+                    cfg.min_gesture_length,
+                )
             });
 
             HOOK_BUFFER.with(|buf_cell| {
@@ -587,7 +739,8 @@ fn handle_right_up(
                     b.clear();
 
                     enqueue_completion(GestureCompletion {
-                        points, point_count: count,
+                        points,
+                        point_count: count,
                         release_point: Point { x, y },
                         config_generation: completion_gen,
                         target_hwnd,
@@ -605,8 +758,12 @@ fn handle_right_up(
 }
 
 fn handle_mouse_move(
-    code: i32, wparam: WPARAM, lparam: LPARAM,
-    origin: InputOrigin, x: i32, y: i32,
+    code: i32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+    origin: InputOrigin,
+    x: i32,
+    y: i32,
 ) -> LRESULT {
     if origin != InputOrigin::Physical {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
@@ -614,19 +771,26 @@ fn handle_mouse_move(
 
     let activated = HOOK_STATE_MACHINE.with(|sm| {
         let mut sm = sm.borrow_mut();
-        sm.as_mut().expect("HOOK_STATE_MACHINE not initialized").on_move(x, y)
+        sm.as_mut()
+            .expect("HOOK_STATE_MACHINE not initialized")
+            .on_move(x, y)
     });
 
     if activated {
         HOOK_BUFFER.with(|buf| {
             let mut buf = buf.borrow_mut();
-            if let Some(ref mut b) = *buf { b.add_force(Point { x, y }); }
+            if let Some(ref mut b) = *buf {
+                b.add_force(Point { x, y });
+            }
         });
         post_event(HookEvent::GestureStarted { x, y, monitor: 0 });
     }
 
     let in_drawing = HOOK_STATE_MACHINE.with(|sm| {
-        sm.borrow().as_ref().map(|s| s.state == crate::state_machine::State::Drawing).unwrap_or(false)
+        sm.borrow()
+            .as_ref()
+            .map(|s| s.state == crate::state_machine::State::Drawing)
+            .unwrap_or(false)
     });
 
     if in_drawing {
@@ -637,13 +801,22 @@ fn handle_mouse_move(
                 if let Some((from, to)) = buf.last_two() {
                     let dir = direction_from_points(from, to);
                     let dir_idx = match dir {
-                        Direction::N => 0, Direction::NE => 1, Direction::E => 2,
-                        Direction::SE => 3, Direction::S => 4, Direction::SW => 5,
-                        Direction::W => 6, Direction::NW => 7,
+                        Direction::N => 0,
+                        Direction::NE => 1,
+                        Direction::E => 2,
+                        Direction::SE => 3,
+                        Direction::S => 4,
+                        Direction::SW => 5,
+                        Direction::W => 6,
+                        Direction::NW => 7,
                     };
                     let prev = HOOK_LAST_DIRECTION.with(|c| c.replace(dir_idx));
                     if prev != dir_idx {
-                        post_event(HookEvent::DirectionChanged { direction: dir, x, y });
+                        post_event(HookEvent::DirectionChanged {
+                            direction: dir,
+                            x,
+                            y,
+                        });
                     }
                 }
             }
@@ -696,7 +869,10 @@ fn enqueue_policy_resolution(pid: u32) {
             // Read config from thread-local to bake into the request
             HOOK_CONFIG.with(|c| {
                 if let Some(ref cfg) = *c.borrow() {
-                    let _ = tx.send(PolicyRequest { pid, config: cfg.clone() });
+                    let _ = tx.send(PolicyRequest {
+                        pid,
+                        config: cfg.clone(),
+                    });
                 }
             });
         }
@@ -706,22 +882,38 @@ fn enqueue_policy_resolution(pid: u32) {
 /// Inject a synthetic right-click at absolute screen coordinates.
 fn inject_synthetic_click(point: Point) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_MOUSE, MOUSEINPUT,
-        MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+        SendInput, INPUT, INPUT_MOUSE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_RIGHTDOWN,
+        MOUSEEVENTF_RIGHTUP, MOUSEINPUT,
     };
 
-    let screen_w = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-        windows::Win32::UI::WindowsAndMessaging::SM_CXVIRTUALSCREEN) };
-    let screen_h = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-        windows::Win32::UI::WindowsAndMessaging::SM_CYVIRTUALSCREEN) };
-    let screen_x = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-        windows::Win32::UI::WindowsAndMessaging::SM_XVIRTUALSCREEN) };
-    let screen_y = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
-        windows::Win32::UI::WindowsAndMessaging::SM_YVIRTUALSCREEN) };
+    let screen_w = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+            windows::Win32::UI::WindowsAndMessaging::SM_CXVIRTUALSCREEN,
+        )
+    };
+    let screen_h = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+            windows::Win32::UI::WindowsAndMessaging::SM_CYVIRTUALSCREEN,
+        )
+    };
+    let screen_x = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+            windows::Win32::UI::WindowsAndMessaging::SM_XVIRTUALSCREEN,
+        )
+    };
+    let screen_y = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
+            windows::Win32::UI::WindowsAndMessaging::SM_YVIRTUALSCREEN,
+        )
+    };
 
     // Validate screen dimensions; abort on zero
     if screen_w <= 0 || screen_h <= 0 {
-        log::warn!("inject_synthetic_click: screen dimensions invalid ({}x{}), aborting", screen_w, screen_h);
+        log::warn!(
+            "inject_synthetic_click: screen dimensions invalid ({}x{}), aborting",
+            screen_w,
+            screen_h
+        );
         return;
     }
 
@@ -729,26 +921,42 @@ fn inject_synthetic_click(point: Point) {
     let y_abs = (((point.y - screen_y) as i64 * 65535i64) / screen_h as i64).clamp(0, 65535) as i32;
 
     let inputs = [
-        INPUT { r#type: INPUT_MOUSE, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-            mi: MOUSEINPUT {
-                dx: x_abs, dy: y_abs, mouseData: 0,
-                dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_RIGHTDOWN,
-                time: 0, dwExtraInfo: SELF_TAG,
-            }
-        }},
-        INPUT { r#type: INPUT_MOUSE, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
-            mi: MOUSEINPUT {
-                dx: x_abs, dy: y_abs, mouseData: 0,
-                dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_RIGHTUP,
-                time: 0, dwExtraInfo: SELF_TAG,
-            }
-        }},
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: x_abs,
+                    dy: y_abs,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_RIGHTDOWN,
+                    time: 0,
+                    dwExtraInfo: SELF_TAG,
+                },
+            },
+        },
+        INPUT {
+            r#type: INPUT_MOUSE,
+            Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
+                mi: MOUSEINPUT {
+                    dx: x_abs,
+                    dy: y_abs,
+                    mouseData: 0,
+                    dwFlags: MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_RIGHTUP,
+                    time: 0,
+                    dwExtraInfo: SELF_TAG,
+                },
+            },
+        },
     ];
 
     let count = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
     if count != 2 {
-        log::warn!("SendInput returned {} of 2 events for synthetic click at ({},{})",
-            count, point.x, point.y);
+        log::warn!(
+            "SendInput returned {} of 2 events for synthetic click at ({},{})",
+            count,
+            point.x,
+            point.y
+        );
     }
 }
 

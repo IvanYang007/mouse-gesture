@@ -26,11 +26,21 @@ pub fn direction_from_points(from: Point, to: Point) -> Direction {
     let dx = (to.x - from.x) as f64;
     let dy = (to.y - from.y) as f64;
     let angle = (-dy).atan2(dx);
-    let angle = if angle < 0.0 { angle + std::f64::consts::TAU } else { angle };
+    let angle = if angle < 0.0 {
+        angle + std::f64::consts::TAU
+    } else {
+        angle
+    };
     let sector = ((angle + std::f64::consts::PI / 8.0) / (std::f64::consts::PI / 4.0)) as u8;
     match sector % 8 {
-        0 => Direction::E, 1 => Direction::NE, 2 => Direction::N, 3 => Direction::NW,
-        4 => Direction::W, 5 => Direction::SW, 6 => Direction::S, _ => Direction::SE,
+        0 => Direction::E,
+        1 => Direction::NE,
+        2 => Direction::N,
+        3 => Direction::NW,
+        4 => Direction::W,
+        5 => Direction::SW,
+        6 => Direction::S,
+        _ => Direction::SE,
     }
 }
 
@@ -39,7 +49,10 @@ pub fn direction_from_points(from: Point, to: Point) -> Direction {
 pub enum GestureResult {
     /// Gesture matched a configured pattern.
     /// Returns the gesture name and the encoded direction sequence.
-    Matched { name: String, directions: Vec<Direction> },
+    Matched {
+        name: String,
+        directions: Vec<Direction>,
+    },
     /// No matching gesture found.
     NoMatch,
     /// Gesture too short (fewer than min_gesture_length tokens after collapse).
@@ -164,9 +177,13 @@ impl GestureBuffer {
 
 /// Encode a gesture buffer's direction sequence (simplify → quantize → collapse).
 pub fn encode_directions(buffer: &GestureBuffer, rdp_epsilon_sq: f64) -> Vec<Direction> {
-    if buffer.len() < 2 { return vec![]; }
+    if buffer.len() < 2 {
+        return vec![];
+    }
     let simplified = rdp_simplify(buffer.stored_points(), rdp_epsilon_sq);
-    if simplified.len() < 2 { return vec![]; }
+    if simplified.len() < 2 {
+        return vec![];
+    }
     let directions = quantize_directions(&simplified);
     collapse_directions(&directions)
 }
@@ -430,9 +447,7 @@ mod tests {
         for x in (0..100).step_by(5) {
             buf.add_point(Point { x, y: 50 });
         }
-        let patterns = vec![
-            ("test".into(), vec![Direction::E]),
-        ];
+        let patterns = vec![("test".into(), vec![Direction::E])];
         let result = classify(&buf, &patterns, 4.0, 1);
         match result {
             GestureResult::Matched { name, .. } => assert_eq!(name, "test"),
@@ -451,9 +466,7 @@ mod tests {
         for y in (20..70).step_by(5) {
             buf.add_point(Point { x: 50, y });
         }
-        let patterns = vec![
-            ("test".into(), vec![Direction::E, Direction::S]),
-        ];
+        let patterns = vec![("test".into(), vec![Direction::E, Direction::S])];
         let result = classify(&buf, &patterns, 4.0, 2);
         match result {
             GestureResult::Matched { name, .. } => assert_eq!(name, "test"),
@@ -467,12 +480,10 @@ mod tests {
         for x in (0..50).step_by(5) {
             buf.add_point(Point { x, y: 20 });
         }
-        let patterns: Vec<(String, Vec<Direction>)> = vec![
-            ("down".into(), vec![Direction::S]),
-        ];
+        let patterns: Vec<(String, Vec<Direction>)> = vec![("down".into(), vec![Direction::S])];
         let result = classify(&buf, &patterns, 4.0, 1);
         match result {
-            GestureResult::NoMatch => {},
+            GestureResult::NoMatch => {}
             _ => panic!("expected NoMatch"),
         }
     }
@@ -485,7 +496,7 @@ mod tests {
         let patterns: Vec<(String, Vec<Direction>)> = vec![];
         let result = classify(&buf, &patterns, 4.0, 3); // min 3 tokens
         match result {
-            GestureResult::TooShort => {},
+            GestureResult::TooShort => {}
             _ => panic!("expected TooShort"),
         }
     }
@@ -514,8 +525,11 @@ mod tests {
     #[test]
     fn collapse_removes_duplicates() {
         let dirs = vec![
-            Direction::N, Direction::N, Direction::N,
-            Direction::E, Direction::E,
+            Direction::N,
+            Direction::N,
+            Direction::N,
+            Direction::E,
+            Direction::E,
             Direction::S,
         ];
         let collapsed = collapse_directions(&dirs);
@@ -537,9 +551,12 @@ mod tests {
     #[test]
     fn buffer_overflow_decimates() {
         let mut buf = GestureBuffer::new(1); // tiny sample distance
-        // Fill beyond MAX_POINTS
+                                             // Fill beyond MAX_POINTS
         for i in 0..(MAX_POINTS + 100) {
-            let ok = buf.add_point(Point { x: i as i32 * 10, y: 0 });
+            let ok = buf.add_point(Point {
+                x: i as i32 * 10,
+                y: 0,
+            });
             if !ok {
                 // After decimation, should still have room but with reduced fidelity
                 // The buffer should never completely reject after adaptive decimation
@@ -605,7 +622,10 @@ mod tests {
         let mut buf = GestureBuffer::new(1); // tiny distance so every add_force stores
         let total = MAX_POINTS + 10;
         for i in 0..total {
-            let ok = buf.add_force(Point { x: i as i32 * 10, y: 0 });
+            let ok = buf.add_force(Point {
+                x: i as i32 * 10,
+                y: 0,
+            });
             if !ok {
                 // Should have decimated once already
                 break;

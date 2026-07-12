@@ -4,12 +4,12 @@
 use anyhow::Result;
 use std::path::PathBuf;
 use windows::Win32::Foundation::HWND;
-use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::System::RemoteDesktop::{
-    WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
-    NOTIFY_FOR_THIS_SESSION,
+    WTSRegisterSessionNotification, WTSUnRegisterSessionNotification, NOTIFY_FOR_THIS_SESSION,
 };
-const ERROR_ALREADY_EXISTS: windows::Win32::Foundation::WIN32_ERROR = windows::Win32::Foundation::WIN32_ERROR(183);
+use windows::Win32::System::Threading::CreateMutexW;
+const ERROR_ALREADY_EXISTS: windows::Win32::Foundation::WIN32_ERROR =
+    windows::Win32::Foundation::WIN32_ERROR(183);
 use windows::core::PCWSTR;
 
 // ── Singleton Mutex ────────────────────────────────────────────
@@ -21,11 +21,7 @@ pub fn acquire_singleton() -> Result<()> {
     let name: Vec<u16> = MUTEX_NAME.encode_utf16().collect();
 
     unsafe {
-        let handle = CreateMutexW(
-            None,
-            true,
-            PCWSTR::from_raw(name.as_ptr()),
-        );
+        let handle = CreateMutexW(None, true, PCWSTR::from_raw(name.as_ptr()));
 
         match handle {
             Ok(_) => {
@@ -103,11 +99,9 @@ impl RotatingLogger {
             std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(&path)?
+                .open(&path)?,
         );
-        self.current_size = std::fs::metadata(&path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        self.current_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
         Ok(())
     }
 

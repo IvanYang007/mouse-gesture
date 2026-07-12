@@ -5,9 +5,9 @@ use crate::config::CompiledInput;
 use crate::state_machine::SELF_TAG;
 use anyhow::Result;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE,
-    GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, VIRTUAL_KEY, VK_CONTROL, VK_LWIN,
+    VK_MENU, VK_RWIN, VK_SHIFT,
 };
 
 /// Inject a pre-compiled keyboard shortcut.
@@ -40,9 +40,7 @@ pub fn inject_key_shortcut(compiled: &[CompiledInput]) -> Result<u32> {
         });
     }
 
-    let sent = unsafe {
-        SendInput(&inputs, std::mem::size_of::<INPUT>() as i32)
-    };
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
 
     Ok(sent)
 }
@@ -57,12 +55,22 @@ pub fn check_modifier_conflict(compiled: &[CompiledInput]) -> Result<()> {
     let mut uses_win = false;
 
     for ci in compiled {
-        if ci.is_up { continue; }
+        if ci.is_up {
+            continue;
+        }
         let vk = ci.vk;
-        if vk == VK_CONTROL.0 { uses_ctrl = true; }
-        if vk == VK_MENU.0 { uses_alt = true; }
-        if vk == VK_SHIFT.0 { uses_shift = true; }
-        if vk == VK_LWIN.0 || vk == VK_RWIN.0 { uses_win = true; }
+        if vk == VK_CONTROL.0 {
+            uses_ctrl = true;
+        }
+        if vk == VK_MENU.0 {
+            uses_alt = true;
+        }
+        if vk == VK_SHIFT.0 {
+            uses_shift = true;
+        }
+        if vk == VK_LWIN.0 || vk == VK_RWIN.0 {
+            uses_win = true;
+        }
     }
 
     // Check physically held modifiers
@@ -75,12 +83,12 @@ pub fn check_modifier_conflict(compiled: &[CompiledInput]) -> Result<()> {
     // OR a modifier in the shortcut is NOT physically held but another is.
     // Simplest safe rule: if ANY modifier is held that's not in the shortcut,
     // reject. If the shortcut uses a modifier that's held, that's fine.
-    if (held_ctrl && !uses_ctrl) || (held_alt && !uses_alt)
-        || (held_shift && !uses_shift) || (held_win && !uses_win)
+    if (held_ctrl && !uses_ctrl)
+        || (held_alt && !uses_alt)
+        || (held_shift && !uses_shift)
+        || (held_win && !uses_win)
     {
-        anyhow::bail!(
-            "modifier conflict: held modifiers don't match shortcut"
-        );
+        anyhow::bail!("modifier conflict: held modifiers don't match shortcut");
     }
 
     Ok(())

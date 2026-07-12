@@ -1,8 +1,8 @@
 //! Integration tests for the mouse gesture daemon.
 
 use mouse_gesture::config::ConfigFile;
-use mouse_gesture::gesture::{GestureBuffer, GestureResult, Point, classify};
-use mouse_gesture::state_machine::{StateMachine, UpResult, GestureContext};
+use mouse_gesture::gesture::{classify, GestureBuffer, GestureResult, Point};
+use mouse_gesture::state_machine::{GestureContext, StateMachine, UpResult};
 
 #[test]
 fn full_pipeline_parse_compile_recognize() {
@@ -36,7 +36,12 @@ action = { type = "key", combo = ["Ctrl", "W"] }
         buf.add_point(Point { x, y: 0 });
     }
 
-    let result = classify(&buf, &snapshot.gestures, snapshot.rdp_epsilon_sq, snapshot.min_gesture_length);
+    let result = classify(
+        &buf,
+        &snapshot.gestures,
+        snapshot.rdp_epsilon_sq,
+        snapshot.min_gesture_length,
+    );
     match result {
         GestureResult::Matched { name, .. } => assert_eq!(name, "maximize"),
         other => panic!("expected Matched(maximize), got {:?}", other),
@@ -63,7 +68,7 @@ fn armed_below_threshold_replays_then_resets() {
     sm.on_move(101, 100);
     let result = sm.on_right_up();
     match result {
-        UpResult::ReplaySynthetic => {},
+        UpResult::ReplaySynthetic => {}
         _ => panic!("expected ReplaySynthetic"),
     }
     assert_eq!(sm.state, mouse_gesture::state_machine::State::Idle);
@@ -76,7 +81,7 @@ fn drawing_above_threshold_classifies_then_resets() {
     sm.on_move(200, 200);
     let result = sm.on_right_up();
     match result {
-        UpResult::GestureComplete => {},
+        UpResult::GestureComplete => {}
         _ => panic!("expected GestureComplete"),
     }
     assert_eq!(sm.state, mouse_gesture::state_machine::State::Idle);
@@ -88,7 +93,7 @@ fn native_pass_passes_through_and_resets() {
     sm.on_right_down(false, false, None);
     let result = sm.on_right_up();
     match result {
-        UpResult::PassThrough => {},
+        UpResult::PassThrough => {}
         _ => panic!("expected PassThrough"),
     }
     assert_eq!(sm.state, mouse_gesture::state_machine::State::Idle);
@@ -136,7 +141,11 @@ fn policy_cache_blacklist_excluded_pid_ineligible() {
 #[test]
 fn direction_changed_event_carries_coordinates() {
     use mouse_gesture::config::Direction;
-    let event = mouse_gesture::input_hook::HookEvent::DirectionChanged { direction: Direction::N, x: 100, y: 200 };
+    let event = mouse_gesture::input_hook::HookEvent::DirectionChanged {
+        direction: Direction::N,
+        x: 100,
+        y: 200,
+    };
     match event {
         mouse_gesture::input_hook::HookEvent::DirectionChanged { direction, x, y } => {
             assert_eq!(direction, Direction::N);
@@ -155,7 +164,11 @@ fn gesture_ended_event_carries_match_result() {
         target_hwnd: 0,
     };
     match matched {
-        mouse_gesture::input_hook::HookEvent::GestureEnded { matched, gesture_name, .. } => {
+        mouse_gesture::input_hook::HookEvent::GestureEnded {
+            matched,
+            gesture_name,
+            ..
+        } => {
             assert!(matched);
             assert_eq!(gesture_name, Some("maximize".into()));
         }
@@ -168,7 +181,11 @@ fn gesture_ended_event_carries_match_result() {
         target_hwnd: 0,
     };
     match unmatched {
-        mouse_gesture::input_hook::HookEvent::GestureEnded { matched, gesture_name, .. } => {
+        mouse_gesture::input_hook::HookEvent::GestureEnded {
+            matched,
+            gesture_name,
+            ..
+        } => {
             assert!(!matched);
             assert_eq!(gesture_name, None);
         }
@@ -252,13 +269,23 @@ action = { type = "launch", path = "wt.exe" }
 
 #[test]
 fn snap_rect_calculations() {
-    use mouse_gesture::window_ops::{MonitorInfo, snap_rect, SnapPosition};
+    use mouse_gesture::window_ops::{snap_rect, MonitorInfo, SnapPosition};
     use windows::Win32::Foundation::RECT;
     let monitor = MonitorInfo {
         handle: 0,
         name: "test".into(),
-        rect: RECT { left: 0, top: 0, right: 1920, bottom: 1080 },
-        work_rect: RECT { left: 0, top: 0, right: 1920, bottom: 1040 },
+        rect: RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        },
+        work_rect: RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1040,
+        },
         dpi: 96,
         is_primary: true,
     };
@@ -290,6 +317,9 @@ action = { type = "window", command = "maximize" }
     let config: ConfigFile = toml::from_str(toml).unwrap();
     let snapshot = config.compile(1, 96).unwrap();
     // Verify the action is compiled and findable
-    let found = snapshot.window_commands.iter().any(|(name, _)| name == "maximize");
+    let found = snapshot
+        .window_commands
+        .iter()
+        .any(|(name, _)| name == "maximize");
     assert!(found);
 }

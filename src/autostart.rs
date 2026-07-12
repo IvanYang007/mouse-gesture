@@ -22,18 +22,20 @@ pub fn sync(enabled: bool) {
 }
 
 fn enable() -> Result<(), String> {
-    let exe_path = std::env::current_exe()
-        .map_err(|e| format!("current_exe: {}", e))?;
+    let exe_path = std::env::current_exe().map_err(|e| format!("current_exe: {}", e))?;
     let exe_str = exe_path.to_string_lossy().to_string();
 
     let output = Command::new("reg")
         .args([
             "add",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-            "/v", "MouseGestureDaemon",
-            "/t", "REG_SZ",
-            "/d", &exe_str,
-            "/f",  // force overwrite
+            "/v",
+            "MouseGestureDaemon",
+            "/t",
+            "REG_SZ",
+            "/d",
+            &exe_str,
+            "/f", // force overwrite
         ])
         .output()
         .map_err(|e| format!("reg add: {}", e))?;
@@ -52,8 +54,9 @@ fn disable() -> Result<(), String> {
         .args([
             "delete",
             r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
-            "/v", "MouseGestureDaemon",
-            "/f",  // force without prompt
+            "/v",
+            "MouseGestureDaemon",
+            "/f", // force without prompt
         ])
         .output()
         .map_err(|e| format!("reg delete: {}", e))?;

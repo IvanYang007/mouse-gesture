@@ -11,20 +11,16 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET,
-    DEFAULT_QUALITY, OUT_DEFAULT_PRECIS,
+    CreateFontW, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY, OUT_DEFAULT_PRECIS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics,
-    GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, IsWindow,
-    MessageBoxW, PostMessageW, RegisterClassExW, SendMessageW,
-    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW,
-    ShowWindow, BS_PUSHBUTTON, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_LEFT,
-    ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, HMENU, MB_ICONERROR,
-    MB_OK, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER, SW_SHOW, WM_APP,
-    WM_CLOSE, WM_COMMAND, WM_NCDESTROY, WM_SETFONT, WM_SIZE,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW, WS_CHILD,
-    WS_EX_CLIENTEDGE, WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, PostMessageW, RegisterClassExW,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    BS_PUSHBUTTON, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_LEFT, ES_MULTILINE, ES_WANTRETURN,
+    GWLP_USERDATA, HMENU, MB_ICONERROR, MB_OK, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER, SW_SHOW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_NCDESTROY, WM_SETFONT, WM_SIZE,
+    WNDCLASSEXW, WS_CHILD, WS_EX_CLIENTEDGE, WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     WS_VSCROLL,
 };
 
@@ -95,8 +91,14 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
             windows::core::PCWSTR::from_raw(class_name.as_ptr()),
             windows::core::PCWSTR::from_raw(title.as_ptr()),
             WS_OVERLAPPEDWINDOW,
-            x, y, EDITOR_W, EDITOR_H,
-            None, None, None, None,
+            x,
+            y,
+            EDITOR_W,
+            EDITOR_H,
+            None,
+            None,
+            None,
+            None,
         )
     }
     .map_err(|e| anyhow::anyhow!("CreateWindowExW failed: {:?}", e))?;
@@ -118,8 +120,14 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
                 windows::core::PCWSTR::from_raw(edit_class.as_ptr()),
                 windows::core::w!(""),
                 style,
-                0, 0, 0, 0,
-                Some(hwnd), None, None, None,
+                0,
+                0,
+                0,
+                0,
+                Some(hwnd),
+                None,
+                None,
+                None,
             )
         }
     }
@@ -136,10 +144,14 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
                 windows::core::PCWSTR::from_raw(btn_class.as_ptr()),
                 windows::core::PCWSTR::from_raw(label.as_ptr()),
                 style,
-                0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
                 Some(hwnd),
                 Some(HMENU(1isize as *mut _)),
-                None, None,
+                None,
+                None,
             )
         }
     }
@@ -156,10 +168,14 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
                 windows::core::PCWSTR::from_raw(btn_class.as_ptr()),
                 windows::core::PCWSTR::from_raw(label.as_ptr()),
                 style,
-                0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
                 Some(hwnd),
                 Some(HMENU(2isize as *mut _)),
-                None, None,
+                None,
+                None,
             )
         }
     }
@@ -170,9 +186,19 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
         let face: Vec<u16> = "Consolas\0".encode_utf16().collect();
         unsafe {
             CreateFontW(
-                18, 0, 0, 0, 400, 0, 0, 0,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, 0,
+                18,
+                0,
+                0,
+                0,
+                400,
+                0,
+                0,
+                0,
+                DEFAULT_CHARSET,
+                OUT_DEFAULT_PRECIS,
+                CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY,
+                0,
                 windows::core::PCWSTR::from_raw(face.as_ptr()),
             )
         }
@@ -194,10 +220,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
         .chain(std::iter::once(0))
         .collect();
     unsafe {
-        let _ = SetWindowTextW(
-            edit,
-            windows::core::PCWSTR::from_raw(text_wide.as_ptr()),
-        );
+        let _ = SetWindowTextW(edit, windows::core::PCWSTR::from_raw(text_wide.as_ptr()));
     }
 
     // Create and store EditorState
@@ -259,8 +282,7 @@ unsafe extern "system" fn editor_proc(
 
         WM_NCDESTROY => {
             // Reclaim EditorState
-            let state_ptr =
-                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
+            let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
             if !state_ptr.is_null() {
                 unsafe {
                     let _ = Box::from_raw(state_ptr);
@@ -272,8 +294,7 @@ unsafe extern "system" fn editor_proc(
         }
 
         WM_SIZE => {
-            let state_ptr =
-                unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
+            let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
             if state_ptr.is_null() {
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
             }
@@ -329,11 +350,9 @@ unsafe extern "system" fn editor_proc(
             let cmd = (wparam.0 as u32 & 0xffff) as u16;
             match cmd {
                 1 => handle_save(hwnd),
-                2 => {
-                    unsafe {
-                        let _ = DestroyWindow(hwnd);
-                    }
-                }
+                2 => unsafe {
+                    let _ = DestroyWindow(hwnd);
+                },
                 _ => {}
             }
             LRESULT(0)
@@ -346,8 +365,7 @@ unsafe extern "system" fn editor_proc(
 // ── Save Logic ─────────────────────────────────────────────────
 
 fn handle_save(hwnd: HWND) {
-    let state_ptr =
-        unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
+    let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
     if state_ptr.is_null() {
         error!("handle_save: state_ptr is null");
         return;
@@ -429,10 +447,7 @@ fn read_edit_text(edit: HWND) -> Result<String> {
 /// Show an error dialog.
 fn show_error(hwnd: HWND, message: &str) {
     let title: Vec<u16> = "Configuration Error\0".encode_utf16().collect();
-    let msg: Vec<u16> = message
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let msg: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         MessageBoxW(
             Some(hwnd),

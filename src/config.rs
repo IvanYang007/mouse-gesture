@@ -83,7 +83,11 @@ pub enum ActionDef {
     #[serde(rename = "key")]
     Key { combo: Vec<String> },
     #[serde(rename = "launch")]
-    Launch { path: String, #[serde(default)] args: Vec<String> },
+    Launch {
+        path: String,
+        #[serde(default)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -111,7 +115,14 @@ pub enum WindowCommand {
 /// Eight cardinal/intercardinal directions for gesture encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
-    N, NE, E, SE, S, SW, W, NW,
+    N,
+    NE,
+    E,
+    SE,
+    S,
+    SW,
+    W,
+    NW,
 }
 
 impl Direction {
@@ -126,7 +137,10 @@ impl Direction {
             "SW" | "DL" => Ok(Direction::SW),
             "W" | "L" => Ok(Direction::W),
             "NW" | "UL" => Ok(Direction::NW),
-            _ => anyhow::bail!("unknown direction: '{}' (expected U/D/L/R/UR/DR/DL/UL or N/S/E/W)", s),
+            _ => anyhow::bail!(
+                "unknown direction: '{}' (expected U/D/L/R/UR/DR/DL/UL or N/S/E/W)",
+                s
+            ),
         }
     }
 }
@@ -188,7 +202,11 @@ impl ConfigFile {
         let meta = std::fs::metadata(path)
             .with_context(|| format!("reading config metadata from {}", path.display()))?;
         if meta.len() > MAX_CONFIG_SIZE {
-            anyhow::bail!("config file too large ({} bytes, max {} bytes)", meta.len(), MAX_CONFIG_SIZE);
+            anyhow::bail!(
+                "config file too large ({} bytes, max {} bytes)",
+                meta.len(),
+                MAX_CONFIG_SIZE
+            );
         }
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("reading config from {}", path.display()))?;
@@ -211,8 +229,7 @@ impl ConfigFile {
             (self.settings.activation_threshold_dip * dpi as f64 / 96.0) as i32;
         let sample_distance_physical =
             (self.settings.sample_distance_dip * dpi as f64 / 96.0) as i32;
-        let rdp_epsilon_physical =
-            self.settings.rdp_epsilon_dip * dpi as f64 / 96.0;
+        let rdp_epsilon_physical = self.settings.rdp_epsilon_dip * dpi as f64 / 96.0;
         let rdp_epsilon_sq = rdp_epsilon_physical * rdp_epsilon_physical;
 
         // Compile gestures
@@ -265,11 +282,7 @@ impl ConfigFile {
                     window_commands.push((name.clone(), command.clone()));
                 }
                 ActionDef::Launch { path, args } => {
-                    launch_actions.push((
-                        name.clone(),
-                        path.clone(),
-                        args.clone(),
-                    ));
+                    launch_actions.push((name.clone(), path.clone(), args.clone()));
                 }
             }
         }
@@ -314,19 +327,25 @@ impl Default for Settings {
     }
 }
 
-fn default_activation_threshold() -> f64 { 3.0 }
-fn default_sample_distance() -> f64 { 2.0 }
-fn default_rdp_epsilon() -> f64 { 2.0 }
-fn default_min_gesture_length() -> u32 { 2 }
+fn default_activation_threshold() -> f64 {
+    3.0
+}
+fn default_sample_distance() -> f64 {
+    2.0
+}
+fn default_rdp_epsilon() -> f64 {
+    2.0
+}
+fn default_min_gesture_length() -> u32 {
+    2
+}
 
 // ── Keyboard Shortcut Compilation ──────────────────────────────
 
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VIRTUAL_KEY, VK_CONTROL, VK_MENU, VK_SHIFT, VK_LWIN, VK_RWIN,
-    VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN,
-    VK_HOME, VK_END, VK_PRIOR, VK_NEXT,
-    VK_INSERT, VK_DELETE, VK_RETURN,
-    VK_TAB, VK_ESCAPE, VK_SPACE, VK_BACK,
+    VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_INSERT,
+    VK_LEFT, VK_LWIN, VK_MENU, VK_NEXT, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT, VK_SPACE,
+    VK_TAB, VK_UP,
 };
 
 /// Compile a key combo string list into SendInput-ready key events.
@@ -349,37 +368,61 @@ fn compile_key_combo(combo: &[String]) -> Result<Vec<CompiledInput>> {
     // Press modifiers (Ctrl before Alt before Shift before Win)
     modifiers.sort_by_key(|&(vk, _, _)| modifier_order(vk));
     for &(vk, scan, is_ext) in &modifiers {
-        inputs.push(CompiledInput { vk, scan, is_extended: is_ext, is_up: false });
+        inputs.push(CompiledInput {
+            vk,
+            scan,
+            is_extended: is_ext,
+            is_up: false,
+        });
     }
 
     // Press main keys
     for &(vk, scan, is_ext) in &main_keys {
-        inputs.push(CompiledInput { vk, scan, is_extended: is_ext, is_up: false });
+        inputs.push(CompiledInput {
+            vk,
+            scan,
+            is_extended: is_ext,
+            is_up: false,
+        });
     }
 
     // Release main keys (reverse order)
     for &(vk, scan, is_ext) in main_keys.iter().rev() {
-        inputs.push(CompiledInput { vk, scan, is_extended: is_ext, is_up: true });
+        inputs.push(CompiledInput {
+            vk,
+            scan,
+            is_extended: is_ext,
+            is_up: true,
+        });
     }
 
     // Release modifiers (reverse order)
     for &(vk, scan, is_ext) in modifiers.iter().rev() {
-        inputs.push(CompiledInput { vk, scan, is_extended: is_ext, is_up: true });
+        inputs.push(CompiledInput {
+            vk,
+            scan,
+            is_extended: is_ext,
+            is_up: true,
+        });
     }
 
     Ok(inputs)
 }
 
 fn modifier_order(vk: u16) -> u8 {
-    if vk == VK_CONTROL.0 { 0 }
-    else if vk == VK_MENU.0 { 1 }
-    else if vk == VK_SHIFT.0 { 2 }
-    else { 3 } // Win
+    if vk == VK_CONTROL.0 {
+        0
+    } else if vk == VK_MENU.0 {
+        1
+    } else if vk == VK_SHIFT.0 {
+        2
+    } else {
+        3
+    } // Win
 }
 
 fn is_modifier(vk: u16) -> bool {
-    vk == VK_CONTROL.0 || vk == VK_MENU.0 || vk == VK_SHIFT.0
-        || vk == VK_LWIN.0 || vk == VK_RWIN.0
+    vk == VK_CONTROL.0 || vk == VK_MENU.0 || vk == VK_SHIFT.0 || vk == VK_LWIN.0 || vk == VK_RWIN.0
 }
 
 /// Resolve a key name to (VIRTUAL_KEY, scan_code, is_extended).
@@ -514,11 +557,14 @@ action = { type = "window", command = "maximize" }
     #[test]
     fn too_many_tokens_rejected() {
         let tokens = (0..33).map(|_| "E").collect::<Vec<_>>().join(" ");
-        let toml = format!(r#"
+        let toml = format!(
+            r#"
 [gestures.long]
 pattern = "{}"
 action = {{ type = "window", command = "maximize" }}
-"#, tokens);
+"#,
+            tokens
+        );
         let config: ConfigFile = toml::from_str(&toml).unwrap();
         let result = config.compile(1, 96);
         assert!(result.is_err());

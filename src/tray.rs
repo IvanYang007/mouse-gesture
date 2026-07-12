@@ -4,19 +4,16 @@
 use anyhow::Result;
 use log;
 use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{LPARAM, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NOTIFYICONDATAW,
-    NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NIF_ICON, NIF_MESSAGE, NIF_TIP,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW,
 };
-use windows::Win32::Foundation::{POINT, WPARAM, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos,
-    LoadImageW, PostMessageW, SetForegroundWindow, TrackPopupMenuEx,
-    HMENU, IMAGE_ICON, LR_LOADFROMFILE, LR_DEFAULTSIZE,
-    HICON, MF_SEPARATOR, MF_STRING,
-    TPM_RIGHTBUTTON, TPM_RETURNCMD, TPM_NONOTIFY,
-    WM_APP, WM_NULL,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadImageW, PostMessageW,
+    SetForegroundWindow, TrackPopupMenuEx, HICON, HMENU, IMAGE_ICON, LR_DEFAULTSIZE,
+    LR_LOADFROMFILE, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP,
+    WM_NULL,
 };
 
 /// Tray icon states for visual status display.
@@ -66,17 +63,39 @@ pub fn show_context_menu(hwnd: HWND) -> Result<Option<TrayCommand>> {
         struct MenuGuard(HMENU);
         impl Drop for MenuGuard {
             fn drop(&mut self) {
-                unsafe { DestroyMenu(self.0); }
+                unsafe {
+                    DestroyMenu(self.0);
+                }
             }
         }
         let menu = MenuGuard(menu);
 
-        AppendMenuW(menu.0, MF_STRING, IDM_CONFIGURE as usize, windows::core::w!("Configure..."));
-        AppendMenuW(menu.0, MF_STRING, IDM_RELOAD_CONFIG as usize, windows::core::w!("Reload configuration"));
+        AppendMenuW(
+            menu.0,
+            MF_STRING,
+            IDM_CONFIGURE as usize,
+            windows::core::w!("Configure..."),
+        );
+        AppendMenuW(
+            menu.0,
+            MF_STRING,
+            IDM_RELOAD_CONFIG as usize,
+            windows::core::w!("Reload configuration"),
+        );
         AppendMenuW(menu.0, MF_SEPARATOR, 0, None);
-        AppendMenuW(menu.0, MF_STRING, IDM_OPEN_CONFIG_FOLDER as usize, windows::core::w!("Open configuration folder"));
+        AppendMenuW(
+            menu.0,
+            MF_STRING,
+            IDM_OPEN_CONFIG_FOLDER as usize,
+            windows::core::w!("Open configuration folder"),
+        );
         AppendMenuW(menu.0, MF_SEPARATOR, 0, None);
-        AppendMenuW(menu.0, MF_STRING, IDM_EXIT as usize, windows::core::w!("Exit"));
+        AppendMenuW(
+            menu.0,
+            MF_STRING,
+            IDM_EXIT as usize,
+            windows::core::w!("Exit"),
+        );
 
         let mut pt = POINT::default();
         GetCursorPos(&mut pt)?;
@@ -87,7 +106,8 @@ pub fn show_context_menu(hwnd: HWND) -> Result<Option<TrayCommand>> {
         let cmd = TrackPopupMenuEx(
             menu.0,
             (TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY).0,
-            pt.x, pt.y,
+            pt.x,
+            pt.y,
             hwnd,
             None,
         );
@@ -121,17 +141,25 @@ impl TrayIcon {
         let callback_msg = WM_APP + 1;
 
         let icon_path = std::env::var("APPDATA")
-            .map(|d| std::path::PathBuf::from(d).join("mouse-gesture").join("icon.ico"))
+            .map(|d| {
+                std::path::PathBuf::from(d)
+                    .join("mouse-gesture")
+                    .join("icon.ico")
+            })
             .unwrap_or_else(|_| std::path::PathBuf::from("icon.ico"));
         let icon_path_str = icon_path.to_string_lossy().to_string();
 
-        let icon_path_wide: Vec<u16> = icon_path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let icon_path_wide: Vec<u16> = icon_path_str
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let icon = unsafe {
             LoadImageW(
                 None,
                 windows::core::PCWSTR::from_raw(icon_path_wide.as_ptr()),
                 IMAGE_ICON,
-                0, 0,
+                0,
+                0,
                 LR_LOADFROMFILE | LR_DEFAULTSIZE,
             )
         };
@@ -164,7 +192,11 @@ impl TrayIcon {
 
         notify_result(unsafe { Shell_NotifyIconW(NIM_ADD, &nid) })?;
 
-        Ok(TrayIcon { hwnd, uid, callback_msg })
+        Ok(TrayIcon {
+            hwnd,
+            uid,
+            callback_msg,
+        })
     }
 
     pub fn update_status(&self, state: &TrayState) -> Result<()> {
@@ -212,11 +244,26 @@ impl TrayIcon {
     pub fn reregister(&self) -> Result<()> {
         let tip: Vec<u16> = "Mouse Gesture Daemon\0".encode_utf16().collect();
         let icon_path = std::env::var("APPDATA")
-            .map(|d| std::path::PathBuf::from(d).join("mouse-gesture").join("icon.ico"))
+            .map(|d| {
+                std::path::PathBuf::from(d)
+                    .join("mouse-gesture")
+                    .join("icon.ico")
+            })
             .unwrap_or_else(|_| std::path::PathBuf::from("icon.ico"));
-        let icon_path_wide: Vec<u16> = icon_path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+        let icon_path_wide: Vec<u16> = icon_path
+            .to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let icon = unsafe {
-            LoadImageW(None, windows::core::PCWSTR::from_raw(icon_path_wide.as_ptr()), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+            LoadImageW(
+                None,
+                windows::core::PCWSTR::from_raw(icon_path_wide.as_ptr()),
+                IMAGE_ICON,
+                32,
+                32,
+                LR_LOADFROMFILE,
+            )
         };
         let hicon = match icon {
             Ok(handle) => HICON(handle.0),

@@ -1,27 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use anyhow::Result;
-use log::{error, info, warn, debug};
+use log::{debug, error, info, warn};
 use mouse_gesture::config::{ConfigFile, ConfigSnapshot};
 use mouse_gesture::input_hook::{self, HookCommand, HookController, HookEvent};
-use mouse_gesture::tray::{TrayCommand, TrayIcon, TrayState};
 use mouse_gesture::lifecycle;
 use mouse_gesture::overlay::OverlayWindow;
-use std::sync::{Arc, Mutex};
+use mouse_gesture::tray::{TrayCommand, TrayIcon, TrayState};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use windows::core::w;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW,
-    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW,
-    TranslateMessage,
-    SetWindowLongPtrW, GetWindowLongPtrW, GWLP_USERDATA,
-    CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MB_ICONERROR, MB_OK,
-    MessageBoxW, MSG,
-    WINDOW_EX_STYLE, WS_OVERLAPPED,
-    WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_QUERYENDSESSION,
-    WM_RBUTTONUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, GetWindowLongPtrW, MessageBoxW,
+    PostMessageW, PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetWindowLongPtrW,
+    TranslateMessage, CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, GWLP_USERDATA, MB_ICONERROR, MB_OK,
+    MSG, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_QUERYENDSESSION,
+    WM_RBUTTONUP, WS_OVERLAPPED,
 };
-use windows::core::w;
 
 const WINDOW_CLASS: &str = "MouseGestureDaemon\0";
 const WM_APP_RELOAD_CONFIG: u32 = WM_APP + 20;
@@ -29,9 +25,21 @@ static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Debug, Clone)]
 enum ActionJob {
-    Window { name: String, cmd: mouse_gesture::config::WindowCommand, target_hwnd: isize },
-    Keyboard { name: String, inputs: Vec<mouse_gesture::config::CompiledInput>, target_hwnd: isize },
-    Launch { name: String, path: String, args: Vec<String> },
+    Window {
+        name: String,
+        cmd: mouse_gesture::config::WindowCommand,
+        target_hwnd: isize,
+    },
+    Keyboard {
+        name: String,
+        inputs: Vec<mouse_gesture::config::CompiledInput>,
+        target_hwnd: isize,
+    },
+    Launch {
+        name: String,
+        path: String,
+        args: Vec<String>,
+    },
 }
 
 struct DaemonState {
@@ -46,7 +54,11 @@ struct DaemonState {
 fn main() {
     // Check config for debug_logging setting before initializing logger
     let config_path = std::env::var("APPDATA")
-        .map(|d| std::path::PathBuf::from(d).join("mouse-gesture").join("config.toml"))
+        .map(|d| {
+            std::path::PathBuf::from(d)
+                .join("mouse-gesture")
+                .join("config.toml")
+        })
         .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"));
     let debug_logging = std::fs::read_to_string(&config_path)
         .ok()
@@ -58,7 +70,11 @@ fn main() {
 
     // Log to a file
     let log_path = std::env::var("APPDATA")
-        .map(|d| std::path::PathBuf::from(d).join("mouse-gesture").join("daemon.log"))
+        .map(|d| {
+            std::path::PathBuf::from(d)
+                .join("mouse-gesture")
+                .join("daemon.log")
+        })
         .unwrap_or_else(|_| std::path::PathBuf::from("daemon.log"));
     if let Some(parent) = log_path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -70,16 +86,22 @@ fn main() {
         }
     }
     let log_file = std::fs::OpenOptions::new()
-        .create(true).append(true)
+        .create(true)
+        .append(true)
         .open(&log_path)
         .unwrap();
 
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
         .format_timestamp_millis()
-        .target(env_logger::Target::Pipe(Box::new(std::io::LineWriter::new(log_file))))
+        .target(env_logger::Target::Pipe(Box::new(
+            std::io::LineWriter::new(log_file),
+        )))
         .init();
 
-    info!("Mouse Gesture Daemon v{} starting (Phase 2)", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Mouse Gesture Daemon v{} starting (Phase 2)",
+        env!("CARGO_PKG_VERSION")
+    );
 
     if let Err(e) = run() {
         error!("Fatal: {}", e);
@@ -122,39 +144,58 @@ fn run() -> Result<()> {
     if config.is_some() {
         tray.update_status(&TrayState::Active { gesture_count })?;
     } else {
-        tray.update_status(&TrayState::Disabled { reason: "No valid config".into() })?;
+        tray.update_status(&TrayState::Disabled {
+            reason: "No valid config".into(),
+        })?;
     }
 
     // Worker thread
     let (worker_tx, worker_rx) = std::sync::mpsc::channel::<ActionJob>();
-    std::thread::Builder::new().name("worker".into()).spawn(move || {
-        for job in worker_rx {
-            match job {
-                ActionJob::Window { name, cmd, target_hwnd } => {
-                    info!("Action: {} (window)", name);
-                    execute_window_action(&cmd, HWND(target_hwnd as *mut _));
-                }
-                ActionJob::Keyboard { name, inputs, target_hwnd } => {
-                    info!("Action: {} (keyboard)", name);
-                    execute_keyboard_action(&inputs, HWND(target_hwnd as *mut _));
-                }
-                ActionJob::Launch { name, path, args } => {
-                    info!("Action: {} (launch)", name);
-                    execute_launch_action(&path, &args);
+    std::thread::Builder::new()
+        .name("worker".into())
+        .spawn(move || {
+            for job in worker_rx {
+                match job {
+                    ActionJob::Window {
+                        name,
+                        cmd,
+                        target_hwnd,
+                    } => {
+                        info!("Action: {} (window)", name);
+                        execute_window_action(&cmd, HWND(target_hwnd as *mut _));
+                    }
+                    ActionJob::Keyboard {
+                        name,
+                        inputs,
+                        target_hwnd,
+                    } => {
+                        info!("Action: {} (keyboard)", name);
+                        execute_keyboard_action(&inputs, HWND(target_hwnd as *mut _));
+                    }
+                    ActionJob::Launch { name, path, args } => {
+                        info!("Action: {} (launch)", name);
+                        execute_launch_action(&path, &args);
+                    }
                 }
             }
-        }
-        info!("Worker stopped");
-    })?;
+            info!("Worker stopped");
+        })?;
 
     // Hook thread + recognition worker + replay worker + policy worker
-    let (_hook_handle, _recog_handle, _replay_handle, _policy_handle, _hook_shared, hook_ctrl, hook_event_rx) =
-        input_hook::spawn_hook_thread(3, 2, hwnd.0 as isize);
+    let (
+        _hook_handle,
+        _recog_handle,
+        _replay_handle,
+        _policy_handle,
+        _hook_shared,
+        hook_ctrl,
+        hook_event_rx,
+    ) = input_hook::spawn_hook_thread(3, 2, hwnd.0 as isize);
 
     // Publish initial policy snapshot
     if let Some(ref cfg) = config {
         mouse_gesture::app_policy::publish_snapshot(
-            mouse_gesture::app_policy::PolicySnapshot::from_snapshot(cfg)
+            mouse_gesture::app_policy::PolicySnapshot::from_snapshot(cfg),
         );
     }
 
@@ -170,9 +211,11 @@ fn run() -> Result<()> {
     // Config watcher thread
     let cfg_path = config_path();
     let hwnd_raw = hwnd.0 as isize;
-    std::thread::Builder::new().name("config-watcher".into()).spawn(move || {
-        watch_config(cfg_path, hwnd_raw);
-    })?;
+    std::thread::Builder::new()
+        .name("config-watcher".into())
+        .spawn(move || {
+            watch_config(cfg_path, hwnd_raw);
+        })?;
 
     // Overlay
     let overlay = OverlayWindow::new()?;
@@ -188,7 +231,9 @@ fn run() -> Result<()> {
         overlay,
     }));
     let state_ptr = Arc::into_raw(state);
-    unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize); }
+    unsafe {
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize);
+    }
 
     info!("Message pump running");
     let code = message_pump(hwnd);
@@ -240,8 +285,14 @@ fn create_notification_window() -> Result<HWND> {
             windows::core::PCWSTR::from_raw(name.as_ptr()),
             windows::core::w!("MouseGestureDaemon"),
             WS_OVERLAPPED,
-            CW_USEDEFAULT, CW_USEDEFAULT, 0, 0,
-            None, None, None, None,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
         )?
     };
     Ok(hwnd)
@@ -251,7 +302,8 @@ fn create_notification_window() -> Result<HWND> {
 
 fn message_pump(hwnd: HWND) -> i32 {
     loop {
-        let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
+        let state_ptr =
+            unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState> };
         if !state_ptr.is_null() {
             let state = unsafe { &*state_ptr };
             let mut pending_events = Vec::new();
@@ -301,7 +353,11 @@ fn dispatch_hook_event(
     config: &Option<ConfigSnapshot>,
 ) {
     match event {
-        HookEvent::GestureEnded { matched: true, gesture_name, target_hwnd } => {
+        HookEvent::GestureEnded {
+            matched: true,
+            gesture_name,
+            target_hwnd,
+        } => {
             let name = gesture_name.as_deref().unwrap_or("?");
             let hwnd = *target_hwnd;
             debug!("Gesture: {} (target=0x{:x})", name, hwnd);
@@ -309,17 +365,32 @@ fn dispatch_hook_event(
             if let (Some(ref cfg), Some(ref tx)) = (config, worker_tx) {
                 for (gesture_name, cmd) in &cfg.window_commands {
                     if gesture_name == name {
-                        tx.send(ActionJob::Window { name: name.to_string(), cmd: cmd.clone(), target_hwnd: hwnd }).ok();
+                        tx.send(ActionJob::Window {
+                            name: name.to_string(),
+                            cmd: cmd.clone(),
+                            target_hwnd: hwnd,
+                        })
+                        .ok();
                         return;
                     }
                 }
                 if let Some(inputs) = cfg.key_map.get(name) {
-                    tx.send(ActionJob::Keyboard { name: name.to_string(), inputs: inputs.clone(), target_hwnd: hwnd }).ok();
+                    tx.send(ActionJob::Keyboard {
+                        name: name.to_string(),
+                        inputs: inputs.clone(),
+                        target_hwnd: hwnd,
+                    })
+                    .ok();
                     return;
                 }
                 for (launch_name, path, args) in &cfg.launch_actions {
                     if launch_name == name {
-                        tx.send(ActionJob::Launch { name: name.to_string(), path: path.clone(), args: args.clone() }).ok();
+                        tx.send(ActionJob::Launch {
+                            name: name.to_string(),
+                            path: path.clone(),
+                            args: args.clone(),
+                        })
+                        .ok();
                         return;
                     }
                 }
@@ -327,8 +398,10 @@ fn dispatch_hook_event(
             }
         }
         HookEvent::GestureEnded { matched: false, .. } => debug!("Gesture: unmatched"),
-        HookEvent::GestureStarted { .. } | HookEvent::TrailPoint { .. }
-        | HookEvent::DirectionChanged { .. } | HookEvent::PatternCaptured { .. } => {}
+        HookEvent::GestureStarted { .. }
+        | HookEvent::TrailPoint { .. }
+        | HookEvent::DirectionChanged { .. }
+        | HookEvent::PatternCaptured { .. } => {}
         HookEvent::Error(msg) => error!("Hook: {}", msg),
     }
 }
@@ -364,10 +437,12 @@ use mouse_gesture::config::WindowCommand;
 
 fn execute_window_action(cmd: &WindowCommand, target_hwnd: HWND) {
     use mouse_gesture::window_ops::{enumerate_monitors, snap_rect, SnapPosition};
-    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetWindowPos, ShowWindowAsync,
-        PostMessageW, SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE, HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, IsWindow};
+    use windows::Win32::Foundation::{LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::WM_CLOSE;
-    use windows::Win32::Foundation::{WPARAM, LPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, IsWindow, PostMessageW, SetWindowPos, ShowWindowAsync, HWND_TOP,
+        SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+    };
 
     // Validate target_hwnd — fall back to foreground if invalid
     let hwnd = if target_hwnd.is_invalid() || !unsafe { IsWindow(Some(target_hwnd)).as_bool() } {
@@ -380,64 +455,160 @@ fn execute_window_action(cmd: &WindowCommand, target_hwnd: HWND) {
     let current_monitor = monitors.first();
 
     match cmd {
-        WindowCommand::Maximize => { unsafe { ShowWindowAsync(hwnd, SW_MAXIMIZE); } }
-        WindowCommand::Minimize => { unsafe { ShowWindowAsync(hwnd, SW_MINIMIZE); } }
-        WindowCommand::Restore => { unsafe { ShowWindowAsync(hwnd, SW_RESTORE); } }
-        WindowCommand::Close => {
-            unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM::default(), LPARAM::default()); }
-        }
+        WindowCommand::Maximize => unsafe {
+            ShowWindowAsync(hwnd, SW_MAXIMIZE);
+        },
+        WindowCommand::Minimize => unsafe {
+            ShowWindowAsync(hwnd, SW_MINIMIZE);
+        },
+        WindowCommand::Restore => unsafe {
+            ShowWindowAsync(hwnd, SW_RESTORE);
+        },
+        WindowCommand::Close => unsafe {
+            PostMessageW(Some(hwnd), WM_CLOSE, WPARAM::default(), LPARAM::default());
+        },
         WindowCommand::SnapLeft => {
             if let Some(m) = current_monitor {
                 let r = snap_rect(m, SnapPosition::Left);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         WindowCommand::SnapRight => {
             if let Some(m) = current_monitor {
                 let r = snap_rect(m, SnapPosition::Right);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         WindowCommand::SnapTop => {
             if let Some(m) = current_monitor {
                 let r = snap_rect(m, SnapPosition::Top);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         WindowCommand::SnapBottom => {
             if let Some(m) = current_monitor {
                 let r = snap_rect(m, SnapPosition::Bottom);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         WindowCommand::SnapTopLeft => {
             if let Some(m) = current_monitor {
                 let r = snap_rect(m, SnapPosition::TopLeft);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         WindowCommand::SnapTopRight => {
             if let Some(m) = current_monitor {
                 let r = snap_rect(m, SnapPosition::TopRight);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         WindowCommand::SnapBottomLeft => {
             if let Some(m) = current_monitor {
                 let r = snap_rect(m, SnapPosition::BottomLeft);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         WindowCommand::SnapBottomRight => {
             if let Some(m) = current_monitor {
                 let r = snap_rect(m, SnapPosition::BottomRight);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         WindowCommand::Center => {
             if let Some(m) = current_monitor {
                 let r = snap_rect(m, SnapPosition::Center);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
         WindowCommand::ToggleAlwaysOnTop => {
@@ -446,7 +617,17 @@ fn execute_window_action(cmd: &WindowCommand, target_hwnd: HWND) {
         WindowCommand::MoveToMonitor(n) => {
             if let Some(m) = monitors.get(*n as usize) {
                 let r = snap_rect(m, SnapPosition::Center);
-                unsafe { SetWindowPos(hwnd, Some(HWND_TOP), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE); }
+                unsafe {
+                    SetWindowPos(
+                        hwnd,
+                        Some(HWND_TOP),
+                        r.left,
+                        r.top,
+                        r.right - r.left,
+                        r.bottom - r.top,
+                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+                    );
+                }
             }
         }
     }
@@ -472,7 +653,9 @@ fn execute_keyboard_action(inputs: &[mouse_gesture::config::CompiledInput], targ
 
 fn execute_launch_action(path: &str, args: &[String]) {
     use mouse_gesture::launch::{launch_executable, shell_open};
-    if args.is_empty() && (path.starts_with("http://") || path.starts_with("https://") || path.contains('.')) {
+    if args.is_empty()
+        && (path.starts_with("http://") || path.starts_with("https://") || path.contains('.'))
+    {
         // Treat URLs and paths with extensions as shell open
         if let Err(e) = shell_open(path) {
             error!("Shell open failed for '{}': {}", path, e);
@@ -487,10 +670,16 @@ fn execute_launch_action(path: &str, args: &[String]) {
 // ── Window Proc ────────────────────────────────────────────────
 
 unsafe extern "system" fn window_proc(
-    hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM,
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
 ) -> LRESULT {
     match msg {
-        WM_DESTROY | WM_CLOSE => { PostQuitMessage(0); LRESULT(0) }
+        WM_DESTROY | WM_CLOSE => {
+            PostQuitMessage(0);
+            LRESULT(0)
+        }
         WM_QUERYENDSESSION => LRESULT(1),
         msg if msg == lifecycle::WM_WTSSESSION_CHANGE => {
             let event = wparam.0 as usize;
@@ -500,7 +689,9 @@ unsafe extern "system" fn window_proc(
                 if !state_ptr.is_null() {
                     if let Ok(guard) = unsafe { &*state_ptr }.lock() {
                         if let Some(ref tray) = guard.tray {
-                            let _ = tray.update_status(&TrayState::Disabled { reason: "Session locked".into() });
+                            let _ = tray.update_status(&TrayState::Disabled {
+                                reason: "Session locked".into(),
+                            });
                         }
                         if let Some(ref ctrl) = guard.hook_ctrl {
                             // Send SetInterception BEFORE ForceReset so the
@@ -517,7 +708,13 @@ unsafe extern "system" fn window_proc(
                 if !state_ptr.is_null() {
                     if let Ok(guard) = unsafe { &*state_ptr }.lock() {
                         if let Some(ref tray) = guard.tray {
-                            let _ = tray.update_status(&TrayState::Active { gesture_count: guard.config.as_ref().map(|c| c.gestures.len()).unwrap_or(0) });
+                            let _ = tray.update_status(&TrayState::Active {
+                                gesture_count: guard
+                                    .config
+                                    .as_ref()
+                                    .map(|c| c.gestures.len())
+                                    .unwrap_or(0),
+                            });
                         }
                         if let Some(ref ctrl) = guard.hook_ctrl {
                             let _ = ctrl.send(HookCommand::SetInterception(true));
@@ -574,9 +771,13 @@ unsafe extern "system" fn window_proc(
                         match mouse_gesture::tray::show_context_menu(hwnd) {
                             Ok(Some(cmd)) => match cmd {
                                 TrayCommand::Configure => {
-                                    if let Err(e) = mouse_gesture::config_editor::open(hwnd, config_path()) {
+                                    if let Err(e) =
+                                        mouse_gesture::config_editor::open(hwnd, config_path())
+                                    {
                                         let error_msg: Vec<u16> =
-                                            format!("Failed to open editor: {}\0", e).encode_utf16().collect();
+                                            format!("Failed to open editor: {}\0", e)
+                                                .encode_utf16()
+                                                .collect();
                                         MessageBoxW(
                                             None,
                                             windows::core::PCWSTR::from_raw(error_msg.as_ptr()),
@@ -628,7 +829,11 @@ unsafe extern "system" fn window_proc(
 
 fn config_path() -> std::path::PathBuf {
     std::env::var("APPDATA")
-        .map(|d| std::path::PathBuf::from(d).join("mouse-gesture").join("config.toml"))
+        .map(|d| {
+            std::path::PathBuf::from(d)
+                .join("mouse-gesture")
+                .join("config.toml")
+        })
         .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"))
 }
 
@@ -636,10 +841,23 @@ fn load_startup_config() -> Result<Option<ConfigSnapshot>> {
     let path = config_path();
     match ConfigFile::load(&path) {
         Ok(cfg) => match cfg.compile(1, 96) {
-            Ok(s) => { info!("Config: {}", path.display()); Ok(Some(s)) }
-            Err(e) => { error!("Invalid config: {}. Interception disabled.", e); Ok(None) }
+            Ok(s) => {
+                info!("Config: {}", path.display());
+                Ok(Some(s))
+            }
+            Err(e) => {
+                error!("Invalid config: {}. Interception disabled.", e);
+                Ok(None)
+            }
         },
-        Err(e) => { warn!("No config at {}: {}. Interception disabled.", path.display(), e); Ok(None) }
+        Err(e) => {
+            warn!(
+                "No config at {}: {}. Interception disabled.",
+                path.display(),
+                e
+            );
+            Ok(None)
+        }
     }
 }
 
@@ -663,7 +881,7 @@ fn reload_config(hwnd: HWND) {
             Ok(snapshot) => {
                 // Publish updated policy snapshot
                 mouse_gesture::app_policy::publish_snapshot(
-                    mouse_gesture::app_policy::PolicySnapshot::from_snapshot(&snapshot)
+                    mouse_gesture::app_policy::PolicySnapshot::from_snapshot(&snapshot),
                 );
                 // Sync autostart
                 mouse_gesture::autostart::sync(snapshot.start_with_windows);
@@ -686,7 +904,9 @@ fn reload_config(hwnd: HWND) {
                 // Do NOT replace existing valid config.
                 // Set tray to error state.
                 if let Some(ref tray) = guard.tray {
-                    let _ = tray.update_status(&TrayState::Error { message: e.to_string() });
+                    let _ = tray.update_status(&TrayState::Error {
+                        message: e.to_string(),
+                    });
                 }
                 // Keep interception as-is: prior valid config stays active;
                 // if none, interception stays disabled.
@@ -696,7 +916,9 @@ fn reload_config(hwnd: HWND) {
             error!("Config reload failed: {}", e);
             // Set tray to error state.
             if let Some(ref tray) = guard.tray {
-                let _ = tray.update_status(&TrayState::Error { message: e.to_string() });
+                let _ = tray.update_status(&TrayState::Error {
+                    message: e.to_string(),
+                });
             }
             // Keep interception as-is.
         }
@@ -706,11 +928,13 @@ fn reload_config(hwnd: HWND) {
 /// Poll the config file periodically for changes.
 fn watch_config(path: std::path::PathBuf, owner: isize) {
     use std::time::Duration;
-    use windows::Win32::Foundation::{HWND, WPARAM, LPARAM};
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
     use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
     let hwnd = HWND(owner as *mut _);
-    let mut last_modified = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+    let mut last_modified = std::fs::metadata(&path)
+        .ok()
+        .and_then(|m| m.modified().ok());
     loop {
         std::thread::sleep(Duration::from_secs(2));
         match std::fs::metadata(&path) {
@@ -720,7 +944,12 @@ fn watch_config(path: std::path::PathBuf, owner: isize) {
                     last_modified = modified;
                     debug!("Config file changed, posting reload message");
                     unsafe {
-                        PostMessageW(Some(hwnd), WM_APP_RELOAD_CONFIG, WPARAM::default(), LPARAM::default());
+                        PostMessageW(
+                            Some(hwnd),
+                            WM_APP_RELOAD_CONFIG,
+                            WPARAM::default(),
+                            LPARAM::default(),
+                        );
                     }
                 }
             }

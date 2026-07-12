@@ -3,30 +3,32 @@
 //! focus-existing logic.
 
 use anyhow::{Context, Result};
+use windows::core::PWSTR;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Threading::{
-    CreateProcessW, CREATE_NO_WINDOW, CREATE_NEW_PROCESS_GROUP,
-    STARTUPINFOW,
+    CreateProcessW, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, STARTUPINFOW,
 };
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    ShowWindowAsync, SetForegroundWindow, FlashWindowEx, FLASHWINFO,
-    FLASHW_TRAY, FLASHW_TIMERNOFG, SW_RESTORE,
+    FlashWindowEx, SetForegroundWindow, ShowWindowAsync, FLASHWINFO, FLASHW_TIMERNOFG, FLASHW_TRAY,
+    SW_RESTORE,
 };
-use windows::core::PWSTR;
 
 /// Launch an executable with optional arguments.
 pub fn launch_executable(path: &str, args: &[String]) -> Result<()> {
     let cmdline = if args.is_empty() {
         path.to_string()
     } else {
-        let quoted_args: Vec<String> = args.iter().map(|a| {
-            if a.contains(' ') || a.contains('"') {
-                format!("\"{}\"", a.replace('"', "\\\""))
-            } else {
-                a.clone()
-            }
-        }).collect();
+        let quoted_args: Vec<String> = args
+            .iter()
+            .map(|a| {
+                if a.contains(' ') || a.contains('"') {
+                    format!("\"{}\"", a.replace('"', "\\\""))
+                } else {
+                    a.clone()
+                }
+            })
+            .collect();
         format!("\"{}\" {}", path, quoted_args.join(" "))
     };
 
@@ -47,7 +49,8 @@ pub fn launch_executable(path: &str, args: &[String]) -> Result<()> {
             None,
             &si,
             &mut pi,
-        ).context("CreateProcessW failed")?;
+        )
+        .context("CreateProcessW failed")?;
     }
 
     Ok(())
@@ -72,7 +75,10 @@ pub fn shell_open(path: &str) -> Result<()> {
         if result.0 as isize > 32 {
             Ok(())
         } else {
-            Err(anyhow::anyhow!("ShellExecuteW failed with code {}", result.0 as isize))
+            Err(anyhow::anyhow!(
+                "ShellExecuteW failed with code {}",
+                result.0 as isize
+            ))
         }
     }
 }

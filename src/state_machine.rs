@@ -248,7 +248,7 @@ mod tests {
         sm.on_move(101, 100);
         let result = sm.on_right_up();
         match result {
-            UpResult::ReplaySynthetic => {},
+            UpResult::ReplaySynthetic => {}
             _ => panic!("expected ReplaySynthetic, got {:?}", result),
         }
     }
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(sm.state, State::Drawing);
         let result = sm.on_right_up();
         match result {
-            UpResult::GestureComplete => {},
+            UpResult::GestureComplete => {}
             _ => panic!("expected GestureComplete, got {:?}", result),
         }
     }
@@ -319,9 +319,9 @@ mod tests {
         let mut sm = StateMachine::new(10);
         sm.on_right_down(false, true, Some(dummy_ctx()));
         sm.on_move(101, 100); // below threshold (threshold=10, dist=1)
-        // Oops — we moved 1px and threshold is 10, so still Armed.
-        // This test verifies physical_button_down resets on ReplaySynthetic.
-        // Actually the threshold is squared: (101-100)² + 0² = 1 < 100, so Armed.
+                              // Oops — we moved 1px and threshold is 10, so still Armed.
+                              // This test verifies physical_button_down resets on ReplaySynthetic.
+                              // Actually the threshold is squared: (101-100)² + 0² = 1 < 100, so Armed.
         let result = sm.on_right_up();
         assert!(matches!(result, UpResult::ReplaySynthetic));
         assert!(!sm.physical_button_down);

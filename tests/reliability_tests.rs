@@ -3,8 +3,8 @@
 //! and resource stability.
 
 use mouse_gesture::config::ConfigFile;
-use mouse_gesture::gesture::{GestureBuffer, GestureResult, Point, classify, MAX_POINTS};
-use mouse_gesture::state_machine::{StateMachine, DownResult, UpResult, GestureContext, State};
+use mouse_gesture::gesture::{classify, GestureBuffer, GestureResult, Point, MAX_POINTS};
+use mouse_gesture::state_machine::{DownResult, GestureContext, State, StateMachine, UpResult};
 
 // ── Gesture Buffer Stress Tests ────────────────────────────────
 
@@ -13,7 +13,10 @@ fn gesture_buffer_handles_oversized_input_gracefully() {
     let mut buf = GestureBuffer::new(1);
     // Push 10,000 points — far beyond MAX_POINTS (256)
     for i in 0..10_000 {
-        let ok = buf.add_point(Point { x: i % 1920, y: (i / 1920) % 1080 });
+        let ok = buf.add_point(Point {
+            x: i % 1920,
+            y: (i / 1920) % 1080,
+        });
         // Buffer should never panic — may reject after decimation
         if !ok {
             // Acceptable: buffer overflow handled
@@ -21,7 +24,10 @@ fn gesture_buffer_handles_oversized_input_gracefully() {
     }
     // Buffer should still be usable after stress
     let result = buf.add_point(Point { x: 100, y: 100 });
-    assert!(result || buf.len() > 0, "buffer should have points or accept new ones");
+    assert!(
+        result || buf.len() > 0,
+        "buffer should have points or accept new ones"
+    );
 }
 
 #[test]
@@ -42,7 +48,7 @@ fn classify_handles_empty_buffer() {
     let patterns = vec![];
     let result = classify(&buf, &patterns, 4.0, 2);
     match result {
-        GestureResult::TooShort => {},
+        GestureResult::TooShort => {}
         _ => panic!("expected TooShort for empty buffer"),
     }
 }
@@ -66,7 +72,7 @@ fn state_machine_handles_spurious_events() {
     // Spurious right-up with no prior right-down
     let result = sm.on_right_up();
     match result {
-        UpResult::Ignored => {},
+        UpResult::Ignored => {}
         _ => panic!("expected Ignored for spurious right-up"),
     }
     // Spurious move in Idle
@@ -81,7 +87,7 @@ fn state_machine_rejects_injected_events_when_ineligible() {
     // Injected event when not eligible
     let result = sm.on_right_down(true, false, None);
     match result {
-        DownResult::Injected => {},
+        DownResult::Injected => {}
         _ => panic!("expected Injected"),
     }
 }
@@ -93,7 +99,7 @@ fn state_machine_excluded_app_does_native_pass() {
     assert_eq!(sm.state, State::NativePass);
     let result = sm.on_right_up();
     match result {
-        UpResult::PassThrough => {},
+        UpResult::PassThrough => {}
         _ => panic!("expected PassThrough"),
     }
     assert_eq!(sm.state, State::Idle);
@@ -116,17 +122,18 @@ min_gesture_length = 1
 }
 
 #[test]
-
 #[test]
-
 #[test]
 fn config_rejects_long_patterns() {
     let tokens = (0..33).map(|_| "E").collect::<Vec<_>>().join(" ");
-    let toml = format!(r#"
+    let toml = format!(
+        r#"
 [gestures.long]
 pattern = "{}"
 action = {{ type = "window", command = "maximize" }}
-"#, tokens);
+"#,
+        tokens
+    );
     let config: ConfigFile = toml::from_str(&toml).unwrap();
     let result = config.compile(1, 96);
     assert!(result.is_err());
@@ -149,11 +156,14 @@ action = { type = "key", combo = ["Ctrl", "NonExistentKey"] }
 #[test]
 fn key_resolution_handles_all_letters() {
     for c in 'A'..='Z' {
-        let toml = format!(r#"
+        let toml = format!(
+            r#"
 [gestures.test]
 pattern = "E"
 action = {{ type = "key", combo = ["{}"] }}
-"#, c);
+"#,
+            c
+        );
         let config: ConfigFile = toml::from_str(&toml).unwrap();
         assert!(config.compile(1, 96).is_ok(), "letter {} should resolve", c);
     }
@@ -162,11 +172,14 @@ action = {{ type = "key", combo = ["{}"] }}
 #[test]
 fn key_resolution_handles_f_keys() {
     for n in 1..=24 {
-        let toml = format!(r#"
+        let toml = format!(
+            r#"
 [gestures.test]
 pattern = "E"
 action = {{ type = "key", combo = ["F{}"] }}
-"#, n);
+"#,
+            n
+        );
         let config: ConfigFile = toml::from_str(&toml).unwrap();
         assert!(config.compile(1, 96).is_ok(), "F{} should resolve", n);
     }
@@ -179,8 +192,12 @@ fn classify_consistently_recognizes_pattern() {
     // Verify that the same gesture always produces the same result
     use mouse_gesture::config::Direction;
     let mut buf = GestureBuffer::new(2);
-    for x in (0..100).step_by(5) { buf.add_point(Point { x, y: 50 }); }
-    for y in (50..100).step_by(5) { buf.add_point(Point { x: 100, y }); }
+    for x in (0..100).step_by(5) {
+        buf.add_point(Point { x, y: 50 });
+    }
+    for y in (50..100).step_by(5) {
+        buf.add_point(Point { x: 100, y });
+    }
 
     let patterns = vec![("test".into(), vec![Direction::E, Direction::S])];
     for _ in 0..100 {
