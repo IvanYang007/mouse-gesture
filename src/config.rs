@@ -31,6 +31,8 @@ pub struct Settings {
     pub rdp_epsilon_dip: f64,
     #[serde(default = "default_min_gesture_length")]
     pub min_gesture_length: u32,
+    #[serde(default)]
+    pub debug_logging: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -114,15 +116,15 @@ impl Direction {
     /// Parse a direction token from config text.
     pub fn from_str(s: &str) -> Result<Self> {
         match s.to_uppercase().as_str() {
-            "N" => Ok(Direction::N),
-            "NE" => Ok(Direction::NE),
-            "E" => Ok(Direction::E),
-            "SE" => Ok(Direction::SE),
-            "S" => Ok(Direction::S),
-            "SW" => Ok(Direction::SW),
-            "W" => Ok(Direction::W),
-            "NW" => Ok(Direction::NW),
-            _ => anyhow::bail!("unknown direction: '{}' (expected N/NE/E/SE/S/SW/W/NW)", s),
+            "N" | "U" => Ok(Direction::N),
+            "NE" | "UR" => Ok(Direction::NE),
+            "E" | "R" => Ok(Direction::E),
+            "SE" | "DR" => Ok(Direction::SE),
+            "S" | "D" => Ok(Direction::S),
+            "SW" | "DL" => Ok(Direction::SW),
+            "W" | "L" => Ok(Direction::W),
+            "NW" | "UL" => Ok(Direction::NW),
+            _ => anyhow::bail!("unknown direction: '{}' (expected U/D/L/R/UR/DR/DL/UL or N/S/E/W)", s),
         }
     }
 }
@@ -296,6 +298,7 @@ impl Default for Settings {
             sample_distance_dip: default_sample_distance(),
             rdp_epsilon_dip: default_rdp_epsilon(),
             min_gesture_length: default_min_gesture_length(),
+            debug_logging: false,
         }
     }
 }

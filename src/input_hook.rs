@@ -92,6 +92,7 @@ pub fn spawn_hook_thread(
             };
 
             shared_clone.ready.store(true, Ordering::SeqCst);
+            log::info!("Hook installed, entering message loop");
 
             let mut msg = MSG::default();
             loop {
@@ -103,13 +104,16 @@ pub fn spawn_hook_thread(
                     match cmd {
                         HookCommand::Shutdown => break,
                         HookCommand::UpdateConfig(snapshot) => {
+                            let n = snapshot.gestures.len();
                             HOOK_CONFIG.with(|c| {
                                 *c.borrow_mut() = Some(snapshot);
                             });
+                            log::info!("Hook config updated: {} gestures", n);
                         }
                         HookCommand::SetInterception(enabled) => {
                             shared_clone.interception_enabled.store(enabled, Ordering::SeqCst);
                             HOOK_INTERCEPTION_ENABLED.with(|c| { *c.borrow_mut() = enabled; });
+                            log::info!("Hook interception: {}", if enabled { "ON" } else { "OFF" });
                         }
                         HookCommand::ForceReset => {
                             HOOK_STATE_MACHINE.with(|sm| {
@@ -319,6 +323,16 @@ fn handle_right_up(
                 sm.borrow().as_ref().map(|s| s.current_generation()).unwrap_or(0)
             });
             let config_changed = current_gen != captured_gen;
+
+            // Force-capture the release position in the buffer — this ensures
+            // the final direction segment is always present even if spatial
+            // coalescing would have dropped it (fast drawing + immediate release).
+            HOOK_BUFFER.with(|buf_cell| {
+                let mut buf = buf_cell.borrow_mut();
+                if let Some(ref mut b) = *buf {
+                    b.add_point(Point { x, y });
+                }
+            });
 
             let classification = HOOK_BUFFER.with(|buf_cell| {
                 let result = {

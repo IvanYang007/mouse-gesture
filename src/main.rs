@@ -39,8 +39,39 @@ struct DaemonState {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+    // Check config for debug_logging setting before initializing logger
+    let config_path = std::env::var("APPDATA")
+        .map(|d| std::path::PathBuf::from(d).join("mouse-gesture").join("config.toml"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"));
+    let debug_logging = std::fs::read_to_string(&config_path)
+        .ok()
+        .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+        .and_then(|v| v.get("settings")?.get("debug_logging")?.as_bool())
+        .unwrap_or(false);
+
+    let log_level = if debug_logging { "debug" } else { "warn" };
+
+    // Log to a file
+    let log_path = std::env::var("APPDATA")
+        .map(|d| std::path::PathBuf::from(d).join("mouse-gesture").join("daemon.log"))
+        .unwrap_or_else(|_| std::path::PathBuf::from("daemon.log"));
+    if let Some(parent) = log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Truncate log if over 1 MiB to prevent unbounded growth
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > 1_048_576 {
+            let _ = std::fs::write(&log_path, "");
+        }
+    }
+    let log_file = std::fs::OpenOptions::new()
+        .create(true).append(true)
+        .open(&log_path)
+        .unwrap();
+
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
         .format_timestamp_millis()
+        .target(env_logger::Target::Pipe(Box::new(std::io::LineWriter::new(log_file))))
         .init();
 
     info!("Mouse Gesture Daemon v{} starting (Phase 2)", env!("CARGO_PKG_VERSION"));

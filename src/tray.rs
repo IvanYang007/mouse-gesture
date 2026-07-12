@@ -2,6 +2,7 @@
 //! and TaskbarCreated re-registration.
 
 use anyhow::{Context, Result};
+use log;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW,
@@ -9,7 +10,8 @@ use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_MESSAGE, NIF_TIP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    LoadIconW, IDI_APPLICATION, WM_APP,
+    LoadImageW, IMAGE_ICON, LR_LOADFROMFILE, LR_DEFAULTSIZE,
+    HICON, WM_APP,
 };
 
 /// Tray icon states for visual status display.
@@ -41,7 +43,31 @@ impl TrayIcon {
         let uid = 1;
         let callback_msg = WM_APP + 1;
 
-        let icon = unsafe { LoadIconW(None, IDI_APPLICATION).context("LoadIconW failed")? };
+        let icon_path = std::env::var("APPDATA")
+            .map(|d| std::path::PathBuf::from(d).join("mouse-gesture").join("icon.ico"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("icon.ico"));
+        let icon_path_str = icon_path.to_string_lossy().to_string();
+
+        let icon_path_wide: Vec<u16> = icon_path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        let icon = unsafe {
+            LoadImageW(
+                None,
+                windows::core::PCWSTR::from_raw(icon_path_wide.as_ptr()),
+                IMAGE_ICON,
+                0, 0,
+                LR_LOADFROMFILE | LR_DEFAULTSIZE,
+            )
+        };
+        let hicon = match icon {
+            Ok(handle) => {
+                log::info!("Custom icon loaded from {}", icon_path_str);
+                HICON(handle.0)
+            }
+            Err(e) => {
+                log::warn!("Failed to load custom icon: {:?}", e);
+                HICON(std::ptr::null_mut())
+            }
+        };
 
         let tip: Vec<u16> = "Mouse Gesture Daemon\0".encode_utf16().collect();
 
@@ -51,7 +77,7 @@ impl TrayIcon {
             uID: uid,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: callback_msg,
-            hIcon: icon,
+            hIcon: hicon,
             ..Default::default()
         };
 
@@ -108,7 +134,17 @@ impl TrayIcon {
 
     pub fn reregister(&self) -> Result<()> {
         let tip: Vec<u16> = "Mouse Gesture Daemon\0".encode_utf16().collect();
-        let icon = unsafe { LoadIconW(None, IDI_APPLICATION).context("LoadIconW failed")? };
+        let icon_path = std::env::var("APPDATA")
+            .map(|d| std::path::PathBuf::from(d).join("mouse-gesture").join("icon.ico"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("icon.ico"));
+        let icon_path_wide: Vec<u16> = icon_path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+        let icon = unsafe {
+            LoadImageW(None, windows::core::PCWSTR::from_raw(icon_path_wide.as_ptr()), IMAGE_ICON, 32, 32, LR_LOADFROMFILE)
+        };
+        let hicon = match icon {
+            Ok(handle) => HICON(handle.0),
+            Err(_) => HICON(std::ptr::null_mut()),
+        };
 
         let mut nid = NOTIFYICONDATAW {
             cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -116,7 +152,7 @@ impl TrayIcon {
             uID: self.uid,
             uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
             uCallbackMessage: self.callback_msg,
-            hIcon: icon,
+            hIcon: hicon,
             ..Default::default()
         };
 
