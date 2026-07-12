@@ -40,8 +40,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 const EDITOR_CLASS: &str = "MouseGestureEditor\0";
-const EDITOR_W: i32 = 800;
-const EDITOR_H: i32 = 600;
+const EDITOR_W: i32 = 860;
+const EDITOR_H: i32 = 660;
 
 /// Reload config message, must match the constant in main.rs.
 const WM_APP_RELOAD_CONFIG: u32 = WM_APP + 20;
