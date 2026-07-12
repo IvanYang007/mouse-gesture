@@ -2,6 +2,7 @@
 //! Re-exports all modules for integration tests.
 
 pub mod app_policy;
+pub mod autostart;
 pub mod config;
 pub mod gesture;
 pub mod input_hook;

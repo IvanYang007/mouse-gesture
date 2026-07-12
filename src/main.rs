@@ -147,6 +147,7 @@ fn run() -> Result<()> {
     if let Some(ref cfg) = config {
         hook_ctrl.send(HookCommand::UpdateConfig(cfg.clone())).ok();
         hook_ctrl.send(HookCommand::SetInterception(true)).ok();
+        mouse_gesture::autostart::sync(cfg.start_with_windows);
         info!("Config loaded: {} gestures active", cfg.gestures.len());
     } else {
         warn!("No config — interception disabled");
@@ -575,6 +576,7 @@ fn watch_config(path: std::path::PathBuf, ctrl: HookController) {
                                 mouse_gesture::app_policy::publish_snapshot(
                                     mouse_gesture::app_policy::PolicySnapshot::from_snapshot(&snapshot)
                                 );
+                                mouse_gesture::autostart::sync(snapshot.start_with_windows);
                                 let _ = ctrl.send(HookCommand::UpdateConfig(snapshot));
                                 let _ = ctrl.send(HookCommand::SetInterception(true));
                             }

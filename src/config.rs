@@ -33,6 +33,8 @@ pub struct Settings {
     pub min_gesture_length: u32,
     #[serde(default)]
     pub debug_logging: bool,
+    #[serde(default)]
+    pub start_with_windows: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -151,6 +153,8 @@ pub struct ConfigSnapshot {
     pub window_commands: Vec<(String, WindowCommand)>,
     /// Compiled launch actions
     pub launch_actions: Vec<(String, String, Vec<String>)>,
+    /// Mirror of settings.start_with_windows for autostart sync
+    pub start_with_windows: bool,
 }
 
 /// Pre-compiled SendInput keyboard entry.
@@ -277,6 +281,7 @@ impl ConfigFile {
             key_map,
             window_commands,
             launch_actions,
+            start_with_windows: self.settings.start_with_windows,
         })
     }
 }
@@ -299,6 +304,7 @@ impl Default for Settings {
             rdp_epsilon_dip: default_rdp_epsilon(),
             min_gesture_length: default_min_gesture_length(),
             debug_logging: false,
+            start_with_windows: false,
         }
     }
 }
