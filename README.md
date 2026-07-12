@@ -56,6 +56,27 @@ debug_logging = false              # set true for verbose daemon.log
 start_with_windows = false         # auto-start via registry
 ```
 
+| Setting | Default | Purpose |
+|---------|---------|---------|
+| `activation_threshold_dip` | 3.0 | Pixels of cursor movement before a gesture activates |
+| `sample_distance_dip` | 2.0 | Minimum pixels between stored points — thins raw mouse data |
+| `rdp_epsilon_dip` | 2.0 | Maximum deviation from a straight line before RDP keeps a point as a corner |
+| `min_gesture_length` | 2 | Minimum direction tokens after collapse — 1 allows single strokes, 2 requires a turn |
+| `debug_logging` | false | Writes verbose output to `daemon.log` when true |
+| `start_with_windows` | false | Registers the daemon in `HKCU\...\Run` for login auto-start |
+
+The recognition pipeline processes raw cursor points in order:
+
+```
+activation threshold  →  gates whether gesture starts
+sample distance       →  thins raw mouse-move events
+RDP epsilon           →  removes wobble, keeps corners
+direction quantize    →  converts points to 8-way (U/D/L/R/UR/DR/DL/UL)
+collapse              →  merges consecutive duplicates: [E,E,S,S] → [E,S]
+min gesture length    →  rejects gestures with too few tokens
+exact match           →  compares against configured patterns
+```
+
 ### Blacklist
 
 ```toml
