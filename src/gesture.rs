@@ -567,4 +567,52 @@ mod tests {
             // The test passes if we don't panic
         }
     }
+
+    // ── add_force tests ──────────────────────────────────────────
+
+    #[test]
+    fn add_force_bypasses_spatial_coalescing() {
+        let mut buf = GestureBuffer::new(10);
+        buf.add_force(Point { x: 0, y: 0 });
+        // This point is 2px away — would be rejected by add_point (2 < 10)
+        buf.add_force(Point { x: 2, y: 0 });
+        assert_eq!(buf.len(), 2, "add_force should not coalesce nearby points");
+    }
+
+    #[test]
+    fn add_force_rejects_exact_duplicate() {
+        let mut buf = GestureBuffer::new(2);
+        buf.add_force(Point { x: 100, y: 100 });
+        assert!(buf.add_force(Point { x: 100, y: 100 }));
+        // Exact duplicate should not increase length
+        assert_eq!(buf.len(), 1);
+    }
+
+    #[test]
+    fn add_force_start_point_preserved() {
+        // Simulate a real gesture: down point + move points
+        let mut buf = GestureBuffer::new(10);
+        buf.add_force(Point { x: 50, y: 50 }); // start point
+        buf.add_point(Point { x: 100, y: 50 }); // first move (past threshold)
+        buf.add_point(Point { x: 150, y: 50 }); // second move
+
+        let dir = direction_from_points(buf.stored_points()[0], buf.stored_points()[1]);
+        assert_eq!(dir, Direction::E);
+    }
+
+    #[test]
+    fn add_force_decimates_on_overflow() {
+        let mut buf = GestureBuffer::new(1); // tiny distance so every add_force stores
+        let total = MAX_POINTS + 10;
+        for i in 0..total {
+            let ok = buf.add_force(Point { x: i as i32 * 10, y: 0 });
+            if !ok {
+                // Should have decimated once already
+                break;
+            }
+        }
+        // Buffer should have points after decimation
+        assert!(buf.len() > 0);
+        assert!(buf.len() < total);
+    }
 }

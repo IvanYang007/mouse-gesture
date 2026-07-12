@@ -287,4 +287,43 @@ mod tests {
         assert_eq!(sm.state, State::Idle);
         assert!(sm.context.is_none());
     }
+
+    #[test]
+    fn physical_button_down_set_on_consumed() {
+        let mut sm = StateMachine::new(10);
+        let result = sm.on_right_down(false, true, Some(dummy_ctx()));
+        assert!(matches!(result, DownResult::Consumed));
+        assert!(sm.physical_button_down);
+    }
+
+    #[test]
+    fn physical_button_down_cleared_on_reset() {
+        let mut sm = StateMachine::new(10);
+        sm.on_right_down(false, true, Some(dummy_ctx()));
+        assert!(sm.physical_button_down);
+        sm.force_reset();
+        assert!(!sm.physical_button_down);
+    }
+
+    #[test]
+    fn physical_button_down_cleared_on_right_up() {
+        let mut sm = StateMachine::new(10);
+        sm.on_right_down(false, true, Some(dummy_ctx()));
+        sm.on_move(200, 200);
+        sm.on_right_up();
+        assert!(!sm.physical_button_down);
+    }
+
+    #[test]
+    fn physical_button_down_cleared_on_replay() {
+        let mut sm = StateMachine::new(10);
+        sm.on_right_down(false, true, Some(dummy_ctx()));
+        sm.on_move(101, 100); // below threshold (threshold=10, dist=1)
+        // Oops — we moved 1px and threshold is 10, so still Armed.
+        // This test verifies physical_button_down resets on ReplaySynthetic.
+        // Actually the threshold is squared: (101-100)² + 0² = 1 < 100, so Armed.
+        let result = sm.on_right_up();
+        assert!(matches!(result, UpResult::ReplaySynthetic));
+        assert!(!sm.physical_button_down);
+    }
 }

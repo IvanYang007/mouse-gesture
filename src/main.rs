@@ -189,11 +189,12 @@ fn run() -> Result<()> {
         guard.overlay.destroy();
     }
     hook_ctrl.send(HookCommand::Shutdown).ok();
-    // Wait for all threads to join
+    // Join hook first — its TLS destructors drop channel senders,
+    // unblocking the worker threads' recv() calls.
+    let _ = _hook_handle.join();
     let _ = _policy_handle.join();
     let _ = _replay_handle.join();
     let _ = _recog_handle.join();
-    let _ = _hook_handle.join();
     lifecycle::unregister_session_notifications(hwnd);
 
     info!("Exit (code {})", code);
@@ -473,8 +474,11 @@ unsafe extern "system" fn window_proc(
                             let _ = tray.update_status(&TrayState::Disabled { reason: "Session locked".into() });
                         }
                         if let Some(ref ctrl) = guard.hook_ctrl {
-                            let _ = ctrl.send(HookCommand::ForceReset);
+                            // Send SetInterception BEFORE ForceReset so the
+                            // ForceReset handler sees interception=false and
+                            // can reset even if physical_button_down is true.
                             let _ = ctrl.send(HookCommand::SetInterception(false));
+                            let _ = ctrl.send(HookCommand::ForceReset);
                         }
                     }
                 }

@@ -48,23 +48,27 @@ pub enum HookCommand {
 /// Origin classification for every hook event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputOrigin {
-    /// Hardware-generated or non-injected event.
     Physical,
-    /// Event injected by this daemon (dwExtraInfo == SELF_TAG).
     SelfInjected,
-    /// Event injected by another process (LLMHF_INJECTED flagged).
     ForeignInjected,
 }
 
-/// Compact completion packet — no heap allocation in the hook callback.
-/// Copied from the gesture buffer on right-up and enqueued to the
-/// recognition worker for off-hook classification.
+/// Classification parameters baked into each completion packet
+/// so the recognition worker never accesses thread-local state.
+type PatternDef = (String, Vec<Direction>);
+
+/// Compact completion packet — zero heap allocation in the hook callback.
+/// Carries everything the recognition worker needs: points + classification params.
 #[derive(Clone)]
 struct GestureCompletion {
     points: [Point; MAX_POINTS],
     point_count: usize,
     release_point: Point,
     config_generation: u64,
+    /// Pre-compiled gesture patterns for classification (owned by this packet).
+    patterns: Arc<Vec<PatternDef>>,
+    rdp_epsilon_sq: f64,
+    min_gesture_length: u32,
 }
 
 /// Shared state between hook thread and main thread.
@@ -75,8 +79,6 @@ pub struct HookShared {
 }
 
 /// Controller for sending commands to the hook thread.
-/// Wakes the hook thread via `PostThreadMessageW` so commands
-/// take effect immediately without waiting for mouse input.
 #[derive(Clone)]
 pub struct HookController {
     cmd_tx: std::sync::mpsc::Sender<HookCommand>,
@@ -84,7 +86,6 @@ pub struct HookController {
 }
 
 impl HookController {
-    /// Send a command and wake the hook thread.
     pub fn send(&self, command: HookCommand) -> std::result::Result<(), String> {
         self.cmd_tx.send(command).map_err(|e| format!("cmd send: {}", e))?;
         if self.hook_thread_id != 0 {
@@ -104,57 +105,49 @@ impl HookController {
     }
 }
 
-/// Spawn the input hook thread, recognition worker, and click-replay worker.
+/// Spawn the input hook thread, recognition worker, replay worker, and policy worker.
 #[allow(clippy::type_complexity)]
 pub fn spawn_hook_thread(
     activation_threshold: i32,
     sample_distance: i32,
     ui_hwnd_raw: isize,
 ) -> (
-    thread::JoinHandle<()>,           // hook join handle
-    thread::JoinHandle<()>,           // recognition worker join handle
-    thread::JoinHandle<()>,           // replay worker join handle
-    thread::JoinHandle<()>,           // policy worker join handle
-    Arc<HookShared>,
-    HookController,
-    std::sync::mpsc::Receiver<HookEvent>,
+    thread::JoinHandle<()>, thread::JoinHandle<()>, thread::JoinHandle<()>, thread::JoinHandle<()>,
+    Arc<HookShared>, HookController, std::sync::mpsc::Receiver<HookEvent>,
 ) {
     let shared = Arc::new(HookShared {
         shutdown: AtomicBool::new(false),
         ready: AtomicBool::new(false),
         interception_enabled: AtomicBool::new(false),
     });
-    let shared_clone = shared.clone();
+    let shared_hook = shared.clone();
+    let shared_recog = shared.clone();
+    let shared_replay = shared.clone();
+    let shared_policy = shared.clone();
 
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<HookCommand>();
     let (event_tx, event_rx) = std::sync::mpsc::channel::<HookEvent>();
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<u32>(0);
 
-    // Recognition worker channel — bounded, small capacity
+    // Recognition worker channel
     let (completion_tx, completion_rx) = std::sync::mpsc::sync_channel::<GestureCompletion>(4);
 
-    // Click replay channel — bounded, capacity 1 (newest overwrites oldest)
+    // Click replay channel
     let (replay_tx, replay_rx) = std::sync::mpsc::sync_channel::<ClickReplay>(1);
 
-    // Policy resolution queue — unknown PIDs from hook → policy worker
-    let (policy_tx, policy_rx) = std::sync::mpsc::channel::<u32>();
+    // Policy resolution queue
+    let (policy_tx, policy_rx) = std::sync::mpsc::channel::<PolicyRequest>();
 
-    let event_tx_clone = event_tx.clone();
-    let shared_clone2 = shared.clone();
+    let event_tx_recog = event_tx.clone();
 
     // ── Hook thread ────────────────────────────────────────────
-    let handle = thread::Builder::new()
-        .name("mouse-hook".into())
+    let hook_handle = thread::Builder::new().name("mouse-hook".into())
         .spawn(move || {
             let ui_hwnd = HWND(ui_hwnd_raw as *mut _);
             init_hook_state(activation_threshold, sample_distance);
             let hook_proc = create_hook_proc(
-                event_tx.clone(),
-                completion_tx,
-                replay_tx,
-                policy_tx,
-                shared_clone.clone(),
-                ui_hwnd,
+                event_tx.clone(), completion_tx, replay_tx, policy_tx,
+                shared_hook.clone(), ui_hwnd,
             );
 
             // Create thread message queue before publishing thread ID
@@ -166,38 +159,32 @@ pub fn spawn_hook_thread(
             let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, hook_proc, None, 0) };
             let hook = match hook {
                 Ok(h) => h,
-                Err(e) => {
-                    log::error!("SetWindowsHookExW failed: {:?}", e);
-                    return;
-                }
+                Err(e) => { log::error!("SetWindowsHookExW failed: {:?}", e); return; }
             };
 
-            shared_clone.ready.store(true, Ordering::SeqCst);
-            log::info!("Hook installed, entering message loop (tid={})", thread_id);
+            shared_hook.ready.store(true, Ordering::SeqCst);
+            log::info!("Hook installed (tid={})", thread_id);
 
             loop {
                 let ret = unsafe { GetMessageW(&mut msg, None, 0, 0) };
-                if ret.0 == 0 || ret.0 == -1 {
-                    break;
-                }
+                if ret.0 == 0 || ret.0 == -1 { break; }
 
                 match msg.message {
                     WM_HOOK_COMMAND => {
                         while let Ok(cmd) = cmd_rx.try_recv() {
-                            process_hook_command(cmd, &shared_clone);
+                            process_hook_command(cmd, &shared_hook);
                         }
                     }
-                    WM_HOOK_SHUTDOWN => break,
+                    // Only honour WM_HOOK_SHUTDOWN when authenticated through the
+                    // channel path (shared.shutdown already set by Shutdown command).
+                    WM_HOOK_SHUTDOWN if shared_hook.shutdown.load(Ordering::SeqCst) => break,
                     _ => {}
-                }
-
-                while let Ok(cmd) = cmd_rx.try_recv() {
-                    process_hook_command(cmd, &shared_clone);
                 }
             }
 
+            // Drain final commands on exit
             while let Ok(cmd) = cmd_rx.try_recv() {
-                process_hook_command(cmd, &shared_clone);
+                process_hook_command(cmd, &shared_hook);
             }
 
             unsafe { let _ = UnhookWindowsHookEx(hook); }
@@ -206,72 +193,57 @@ pub fn spawn_hook_thread(
         .expect("spawn hook thread");
 
     // ── Recognition worker ──────────────────────────────────────
-    let recog_handle = thread::Builder::new()
-        .name("mouse-recognize".into())
+    let recog_handle = thread::Builder::new().name("mouse-recognize".into())
         .spawn(move || {
             while let Ok(completion) = completion_rx.recv() {
-                if shared_clone2.shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
+                if shared_recog.shutdown.load(Ordering::Relaxed) { break; }
 
-                // Reconstruct a temporary buffer from the completion packet
+                // Reconstruct buffer from completion packet
                 let mut buf = GestureBuffer::new(2);
                 for i in 0..completion.point_count.min(MAX_POINTS) {
                     buf.add_force(completion.points[i]);
                 }
                 buf.add_force(completion.release_point);
 
-                // Check config generation
-                let classification = HOOK_CONFIG.with(|cfg_cell| {
-                    let cfg = cfg_cell.borrow();
-                    let cfg_inner = cfg.as_ref().expect("HOOK_CONFIG not initialized");
+                // Config generation check: 0 sentinel = mismatch from hook side
+                let config_changed = completion.config_generation == 0;
 
-                    let config_changed = completion.config_generation != 0
-                        && completion.config_generation != cfg_inner.generation;
-
-                    if config_changed {
-                        crate::gesture::GestureResult::NoMatch
-                    } else {
-                        classify(
-                            &buf,
-                            &cfg_inner.gestures,
-                            cfg_inner.rdp_epsilon_sq,
-                            cfg_inner.min_gesture_length,
-                        )
-                    }
-                });
+                let classification = if config_changed {
+                    GestureResult::NoMatch
+                } else {
+                    classify(
+                        &buf,
+                        &completion.patterns,
+                        completion.rdp_epsilon_sq,
+                        completion.min_gesture_length,
+                    )
+                };
 
                 match classification {
                     GestureResult::Matched { name, .. } => {
-                        let _ = event_tx_clone.send(HookEvent::GestureEnded {
-                            matched: true,
-                            gesture_name: Some(name),
+                        let _ = event_tx_recog.send(HookEvent::GestureEnded {
+                            matched: true, gesture_name: Some(name),
                         });
                     }
                     _ => {
-                        let _ = event_tx_clone.send(HookEvent::GestureEnded {
-                            matched: false,
-                            gesture_name: None,
+                        let _ = event_tx_recog.send(HookEvent::GestureEnded {
+                            matched: false, gesture_name: None,
                         });
                     }
                 }
 
                 // Wake the UI thread
-                let _ = post_ui_wake(ui_hwnd_raw);
+                post_ui_wake(ui_hwnd_raw);
             }
             log::info!("Recognition worker shut down");
         })
         .expect("spawn recognition worker");
 
     // ── Click replay worker ─────────────────────────────────────
-    let shared_clone3 = shared.clone();
-    let replay_handle = thread::Builder::new()
-        .name("mouse-replay".into())
+    let replay_handle = thread::Builder::new().name("mouse-replay".into())
         .spawn(move || {
             while let Ok(replay) = replay_rx.recv() {
-                if shared_clone3.shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
+                if shared_replay.shutdown.load(Ordering::Relaxed) { break; }
                 inject_synthetic_click(replay.release_point);
             }
             log::info!("Replay worker shut down");
@@ -279,33 +251,28 @@ pub fn spawn_hook_thread(
         .expect("spawn replay worker");
 
     // ── Policy worker ──────────────────────────────────────────
-    let shared_clone4 = shared.clone();
-    let policy_handle = thread::Builder::new()
-        .name("policy-resolver".into())
+    let policy_handle = thread::Builder::new().name("policy-resolver".into())
         .spawn(move || {
-            while let Ok(pid) = policy_rx.recv() {
-                if shared_clone4.shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
-                // Read current config to resolve PID
+            while let Ok(req) = policy_rx.recv() {
+                if shared_policy.shutdown.load(Ordering::Relaxed) { break; }
+
                 let snapshot = app_policy::get_snapshot();
                 if let Some(current) = snapshot {
-                    // Build updated snapshot and publish
+                    let entry = app_policy::resolve_pid(req.pid, &req.config);
                     let mut new_snapshot = app_policy::PolicySnapshot {
                         mode: current.mode.clone(),
                         generation: current.generation,
                         known_pids: current.known_pids.clone(),
                     };
-                    // Use resolve_pid to determine eligibility
-                    let entry = HOOK_CONFIG.with(|c| {
-                        c.borrow().as_ref().and_then(|cfg| app_policy::resolve_pid(pid, cfg))
-                    });
                     if let Some(entry) = entry {
                         let eligibility = if entry.is_eligible { Eligibility::Allowed } else { Eligibility::Denied };
-                        new_snapshot.known_pids.insert(pid, eligibility);
-                        log::debug!("Policy: PID {} -> {} ({})", pid, entry.basename, if entry.is_eligible { "allowed" } else { "denied" });
+                        let changed = new_snapshot.known_pids.insert(req.pid, eligibility) != Some(eligibility);
+                        if changed {
+                            log::debug!("Policy: PID {} -> {} ({})", req.pid, entry.basename,
+                                if entry.is_eligible { "allowed" } else { "denied" });
+                            app_policy::publish_snapshot(new_snapshot);
+                        }
                     }
-                    app_policy::publish_snapshot(new_snapshot);
                 }
             }
             log::info!("Policy worker shut down");
@@ -315,7 +282,7 @@ pub fn spawn_hook_thread(
     let hook_thread_id = ready_rx.recv().expect("hook thread not ready");
     let controller = HookController { cmd_tx, hook_thread_id };
 
-    (handle, recog_handle, replay_handle, policy_handle, shared, controller, event_rx)
+    (hook_handle, recog_handle, replay_handle, policy_handle, shared, controller, event_rx)
 }
 
 /// Process a single hook command (called from the hook thread).
@@ -339,8 +306,8 @@ fn process_hook_command(cmd: HookCommand, shared: &HookShared) {
             log::info!("Hook interception: {}", if enabled { "ON" } else { "OFF" });
         }
         HookCommand::ForceReset => {
-            // State-aware reset: only if the physical button is not held
-            // (lost-release recovery) or during shutdown/session-lock.
+            // State-aware reset: only if button not physically held,
+            // or during shutdown/session-lock.
             let can_reset = HOOK_STATE_MACHINE.with(|sm| {
                 sm.borrow().as_ref().map(|s| {
                     !s.physical_button_down
@@ -371,7 +338,7 @@ thread_local! {
     static HOOK_EVENT_TX: std::cell::OnceCell<std::sync::mpsc::Sender<HookEvent>> = const { std::cell::OnceCell::new() };
     static HOOK_COMPLETION_TX: std::cell::OnceCell<std::sync::mpsc::SyncSender<GestureCompletion>> = const { std::cell::OnceCell::new() };
     static HOOK_REPLAY_TX: std::cell::OnceCell<std::sync::mpsc::SyncSender<ClickReplay>> = const { std::cell::OnceCell::new() };
-    static HOOK_POLICY_QUEUE: std::cell::OnceCell<std::sync::mpsc::Sender<u32>> = const { std::cell::OnceCell::new() };
+    static HOOK_POLICY_QUEUE: std::cell::OnceCell<std::sync::mpsc::Sender<PolicyRequest>> = const { std::cell::OnceCell::new() };
     static HOOK_INTERCEPTION_ENABLED: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
     static HOOK_UI_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static HOOK_LAST_DIRECTION: std::cell::Cell<u8> = const { std::cell::Cell::new(8) };
@@ -383,14 +350,14 @@ fn create_hook_proc(
     event_tx: std::sync::mpsc::Sender<HookEvent>,
     completion_tx: std::sync::mpsc::SyncSender<GestureCompletion>,
     replay_tx: std::sync::mpsc::SyncSender<ClickReplay>,
-    policy_queue: std::sync::mpsc::Sender<u32>,
+    policy_queue: std::sync::mpsc::Sender<PolicyRequest>,
     shared: Arc<HookShared>,
     ui_hwnd: HWND,
 ) -> HOOKPROC {
-    HOOK_EVENT_TX.with(|cell| { cell.set(event_tx).expect("HOOK_EVENT_TX already set"); });
-    HOOK_COMPLETION_TX.with(|cell| { cell.set(completion_tx).expect("HOOK_COMPLETION_TX already set"); });
-    HOOK_REPLAY_TX.with(|cell| { cell.set(replay_tx).expect("HOOK_REPLAY_TX already set"); });
-    HOOK_POLICY_QUEUE.with(|cell| { cell.set(policy_queue).expect("HOOK_POLICY_QUEUE already set"); });
+    HOOK_EVENT_TX.with(|c| { c.set(event_tx).expect("HOOK_EVENT_TX"); });
+    HOOK_COMPLETION_TX.with(|c| { c.set(completion_tx).expect("HOOK_COMPLETION_TX"); });
+    HOOK_REPLAY_TX.with(|c| { c.set(replay_tx).expect("HOOK_REPLAY_TX"); });
+    HOOK_POLICY_QUEUE.with(|c| { c.set(policy_queue).expect("HOOK_POLICY_QUEUE"); });
     HOOK_INTERCEPTION_ENABLED.with(|c| {
         *c.borrow_mut() = shared.interception_enabled.load(Ordering::Relaxed);
     });
@@ -416,23 +383,19 @@ fn post_event(event: HookEvent) {
 }
 
 /// Wake the UI thread message pump (used by recognition/replay workers).
-fn post_ui_wake(ui_hwnd_raw: isize) -> std::result::Result<(), windows::core::Error> {
-    if ui_hwnd_raw == 0 {
-        return Ok(());
-    }
+fn post_ui_wake(ui_hwnd_raw: isize) {
+    if ui_hwnd_raw == 0 { return; }
     unsafe {
         use windows::Win32::Foundation::{WPARAM, LPARAM};
         use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-        PostMessageW(Some(HWND(ui_hwnd_raw as *mut _)), 0x8002, WPARAM::default(), LPARAM::default())
+        let _ = PostMessageW(Some(HWND(ui_hwnd_raw as *mut _)), 0x8002, WPARAM::default(), LPARAM::default());
     }
 }
 
 unsafe extern "system" fn low_level_mouse_proc(
     code: i32, wparam: WPARAM, lparam: LPARAM,
 ) -> LRESULT {
-    if code < 0 {
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
+    if code < 0 { return CallNextHookEx(None, code, wparam, lparam); }
     if !HOOK_INTERCEPTION_ENABLED.with(|c| *c.borrow()) {
         return CallNextHookEx(None, code, wparam, lparam);
     }
@@ -440,7 +403,7 @@ unsafe extern "system" fn low_level_mouse_proc(
         process_mouse_event(code, wparam, lparam)
     }));
     match result {
-        Ok(lresult) => lresult,
+        Ok(r) => r,
         Err(_) => CallNextHookEx(None, code, wparam, lparam),
     }
 }
@@ -451,9 +414,7 @@ fn process_mouse_event(_code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let is_move = msg == WM_MOUSEMOVE;
 
     let in_gesture = HOOK_STATE_MACHINE.with(|sm| {
-        sm.borrow().as_ref()
-            .map(|s| s.state != crate::state_machine::State::Idle)
-            .unwrap_or(false)
+        sm.borrow().as_ref().map(|s| s.state != crate::state_machine::State::Idle).unwrap_or(false)
     });
 
     if !is_right && !(is_move && in_gesture) {
@@ -462,7 +423,6 @@ fn process_mouse_event(_code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
 
     let hook_data = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
 
-    // Determine InputOrigin
     let origin = if hook_data.dwExtraInfo == SELF_TAG {
         InputOrigin::SelfInjected
     } else if (hook_data.flags & LLMHF_INJECTED) != 0 {
@@ -471,7 +431,7 @@ fn process_mouse_event(_code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         InputOrigin::Physical
     };
 
-    // Self-injected events: always pass through, never interact with gesture state
+    // Self-injected events: always pass through
     if origin == InputOrigin::SelfInjected {
         return unsafe { CallNextHookEx(None, _code, wparam, lparam) };
     }
@@ -494,31 +454,26 @@ fn handle_right_down(
     code: i32, wparam: WPARAM, lparam: LPARAM,
     origin: InputOrigin, x: i32, y: i32,
 ) -> LRESULT {
-    // Foreign-injected down: pass through, don't start a gesture
     if origin != InputOrigin::Physical {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
     let (target_hwnd, target_pid) = resolve_window_under_cursor(x, y);
 
-    // Determine eligibility from the atomic policy snapshot (P0.3).
-    // Zero-allocation, lock-free read from the hook callback.
+    // Determine eligibility from atomic policy snapshot
     let is_eligible = if target_pid == 0 || target_pid == std::process::id() {
         false
     } else {
         match app_policy::get_snapshot() {
-            Some(snapshot) => {
-                match snapshot.lookup(target_pid) {
-                    Some(Eligibility::Allowed) => true,
-                    Some(Eligibility::Denied) => false,
-                    None => {
-                        // Unknown PID — enqueue async resolution, apply default
-                        enqueue_policy_resolution(target_pid);
-                        snapshot.default_for_unknown() == Eligibility::Allowed
-                    }
+            Some(snapshot) => match snapshot.lookup(target_pid) {
+                Some(Eligibility::Allowed) => true,
+                Some(Eligibility::Denied) => false,
+                None => {
+                    enqueue_policy_resolution(target_pid);
+                    snapshot.default_for_unknown() == Eligibility::Allowed
                 }
-            }
-            None => true, // no snapshot yet — default allow
+            },
+            None => true,
         }
     };
 
@@ -526,32 +481,27 @@ fn handle_right_down(
 
     let ctx = if is_eligible {
         Some(GestureContext {
-            target_hwnd,
-            target_pid,
-            foreground_hwnd,
+            target_hwnd, target_pid, foreground_hwnd,
             start_point: POINT { x, y },
-            origin_monitor: 0,
-            origin_dpi: 96,
+            origin_monitor: 0, origin_dpi: 96,
             config_generation: HOOK_CONFIG.with(|c| {
                 c.borrow().as_ref().map(|cfg| cfg.generation).unwrap_or(0)
             }),
         })
     } else { None };
 
+    // Caller already guarantees Physical origin — pass false for is_injected
     let result = HOOK_STATE_MACHINE.with(|sm| {
         let mut sm = sm.borrow_mut();
         sm.as_mut().expect("HOOK_STATE_MACHINE not initialized")
-            .on_right_down(origin == InputOrigin::Physical, is_eligible, ctx)
+            .on_right_down(false, is_eligible, ctx)
     });
 
     match result {
         DownResult::Consumed => {
-            // Seed the gesture buffer with the start point (P0.6)
             HOOK_BUFFER.with(|buf_cell| {
                 let mut buf = buf_cell.borrow_mut();
-                if let Some(ref mut b) = *buf {
-                    b.add_force(Point { x, y });
-                }
+                if let Some(ref mut b) = *buf { b.add_force(Point { x, y }); }
             });
             HOOK_LAST_DIRECTION.with(|c| c.set(8));
             LRESULT(1)
@@ -564,9 +514,7 @@ fn resolve_window_under_cursor(x: i32, y: i32) -> (HWND, u32) {
     use windows::Win32::UI::WindowsAndMessaging::{WindowFromPoint, GetWindowThreadProcessId};
     unsafe {
         let hwnd = WindowFromPoint(POINT { x, y });
-        if hwnd.0.is_null() {
-            return (HWND::default(), 0);
-        }
+        if hwnd.0.is_null() { return (HWND::default(), 0); }
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         (hwnd, pid)
@@ -577,17 +525,12 @@ fn handle_right_up(
     code: i32, wparam: WPARAM, lparam: LPARAM,
     origin: InputOrigin, x: i32, y: i32,
 ) -> LRESULT {
-    // Foreign-injected up during a physical capture: suppress it.
-    // The physical up will arrive separately to complete the gesture.
+    // Foreign-injected up during physical capture: suppress it
     if origin != InputOrigin::Physical {
         let in_capture = HOOK_STATE_MACHINE.with(|sm| {
-            sm.borrow().as_ref()
-                .map(|s| s.physical_button_down)
-                .unwrap_or(false)
+            sm.borrow().as_ref().map(|s| s.physical_button_down).unwrap_or(false)
         });
-        if in_capture {
-            return LRESULT(1); // suppress foreign up
-        }
+        if in_capture { return LRESULT(1); }
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
@@ -599,32 +542,30 @@ fn handle_right_up(
     match result {
         UpResult::ReplaySynthetic => {
             HOOK_LAST_DIRECTION.with(|c| c.set(8));
-            // Enqueue to replay worker — no longer posts HookEvent
-            enqueue_replay(ClickReplay {
-                release_point: Point { x, y },
-                requested_at: std::time::Instant::now(),
-            });
+            enqueue_replay(ClickReplay { release_point: Point { x, y } });
             LRESULT(1)
         }
         UpResult::GestureComplete => {
             HOOK_LAST_DIRECTION.with(|c| c.set(8));
 
-            // Build completion packet with zero heap allocation
+            // Capture config generation for mismatch detection
             let config_gen = HOOK_CONFIG.with(|c| {
                 c.borrow().as_ref().map(|cfg| cfg.generation).unwrap_or(0)
             });
-
             let captured_gen = HOOK_STATE_MACHINE.with(|sm| {
                 sm.borrow().as_ref().map(|s| s.current_generation()).unwrap_or(0)
             });
 
-            // Config hot-reload mid-gesture? Still enqueue — the recognition
-            // worker handles generation mismatch
-            let completion_gen = if captured_gen != 0 && captured_gen != config_gen {
-                0 // signal mismatch
-            } else {
-                captured_gen
-            };
+            // 0 sentinel = config changed mid-gesture
+            let completion_gen = if captured_gen != 0 && captured_gen != config_gen { 0 } else { captured_gen };
+
+            // Bake classification params from config into the completion packet
+            // so the recognition worker never touches thread-local state
+            let (patterns, rdp_epsilon_sq, min_gesture_length) = HOOK_CONFIG.with(|c| {
+                let cfg = c.borrow();
+                let cfg = cfg.as_ref().expect("HOOK_CONFIG not initialized");
+                (Arc::new(cfg.gestures.clone()), cfg.rdp_epsilon_sq, cfg.min_gesture_length)
+            });
 
             HOOK_BUFFER.with(|buf_cell| {
                 let mut buf = buf_cell.borrow_mut();
@@ -636,10 +577,12 @@ fn handle_right_up(
                     b.clear();
 
                     enqueue_completion(GestureCompletion {
-                        points,
-                        point_count: count,
+                        points, point_count: count,
                         release_point: Point { x, y },
                         config_generation: completion_gen,
+                        patterns,
+                        rdp_epsilon_sq,
+                        min_gesture_length,
                     });
                 }
             });
@@ -654,7 +597,6 @@ fn handle_mouse_move(
     code: i32, wparam: WPARAM, lparam: LPARAM,
     origin: InputOrigin, x: i32, y: i32,
 ) -> LRESULT {
-    // Foreign-injected move: never contribute to a physical gesture buffer
     if origin != InputOrigin::Physical {
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
@@ -665,20 +607,15 @@ fn handle_mouse_move(
     });
 
     if activated {
-        // Seed the activation-crossing point (P0.6)
         HOOK_BUFFER.with(|buf| {
             let mut buf = buf.borrow_mut();
-            if let Some(ref mut b) = *buf {
-                b.add_force(Point { x, y });
-            }
+            if let Some(ref mut b) = *buf { b.add_force(Point { x, y }); }
         });
         post_event(HookEvent::GestureStarted { x, y, monitor: 0 });
     }
 
     let in_drawing = HOOK_STATE_MACHINE.with(|sm| {
-        sm.borrow().as_ref()
-            .map(|s| s.state == crate::state_machine::State::Drawing)
-            .unwrap_or(false)
+        sm.borrow().as_ref().map(|s| s.state == crate::state_machine::State::Drawing).unwrap_or(false)
     });
 
     if in_drawing {
@@ -710,47 +647,58 @@ fn handle_mouse_move(
 fn enqueue_completion(completion: GestureCompletion) {
     HOOK_COMPLETION_TX.with(|tx| {
         if let Some(tx) = tx.get() {
-            // try_send: non-blocking. If channel is full (4 pending),
-            // drop the oldest — better than blocking the hook callback.
-            let _ = tx.try_send(completion);
+            // Non-blocking send: if channel is full (4 pending),
+            // drop the new completion rather than blocking the hook callback.
+            if tx.try_send(completion).is_err() {
+                log::warn!("Completion channel full — dropping gesture");
+            }
         }
     });
 }
 
-/// Click replay packet for the replay worker.
+/// Click replay packet.
 #[derive(Debug, Clone)]
 struct ClickReplay {
     release_point: Point,
-    requested_at: std::time::Instant,
 }
 
 fn enqueue_replay(replay: ClickReplay) {
     HOOK_REPLAY_TX.with(|tx| {
         if let Some(tx) = tx.get() {
-            let _ = tx.try_send(replay);
+            if tx.try_send(replay).is_err() {
+                log::warn!("Replay channel full — dropping click");
+            }
         }
     });
 }
 
-/// Enqueue an unknown PID for async resolution by the policy worker.
-/// Fire-and-forget — if the channel is full, drop silently.
+/// Policy resolution request — carries the config snapshot so the
+/// policy worker never accesses thread-local state.
+struct PolicyRequest {
+    pid: u32,
+    config: ConfigSnapshot,
+}
+
 fn enqueue_policy_resolution(pid: u32) {
     HOOK_POLICY_QUEUE.with(|tx| {
         if let Some(tx) = tx.get() {
-            let _ = tx.send(pid);
+            // Read config from thread-local to bake into the request
+            HOOK_CONFIG.with(|c| {
+                if let Some(ref cfg) = *c.borrow() {
+                    let _ = tx.send(PolicyRequest { pid, config: cfg.clone() });
+                }
+            });
         }
     });
 }
 
 /// Inject a synthetic right-click at absolute screen coordinates.
-/// Called from the replay worker thread, NOT the hook callback.
 fn inject_synthetic_click(point: Point) {
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_MOUSE, MOUSEINPUT,
         MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
     };
 
-    // Get virtual screen dimensions for absolute coordinate normalization
     let screen_w = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
         windows::Win32::UI::WindowsAndMessaging::SM_CXVIRTUALSCREEN) };
     let screen_h = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
@@ -760,13 +708,14 @@ fn inject_synthetic_click(point: Point) {
     let screen_y = unsafe { windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(
         windows::Win32::UI::WindowsAndMessaging::SM_YVIRTUALSCREEN) };
 
-    // Normalize to 0..65535 range
-    let x_abs = if screen_w > 0 {
-        (((point.x - screen_x) as i64 * 65535i64) / screen_w as i64) as i32
-    } else { 0 };
-    let y_abs = if screen_h > 0 {
-        (((point.y - screen_y) as i64 * 65535i64) / screen_h as i64) as i32
-    } else { 0 };
+    // Validate screen dimensions; abort on zero
+    if screen_w <= 0 || screen_h <= 0 {
+        log::warn!("inject_synthetic_click: screen dimensions invalid ({}x{}), aborting", screen_w, screen_h);
+        return;
+    }
+
+    let x_abs = (((point.x - screen_x) as i64 * 65535i64) / screen_w as i64).clamp(0, 65535) as i32;
+    let y_abs = (((point.y - screen_y) as i64 * 65535i64) / screen_h as i64).clamp(0, 65535) as i32;
 
     let inputs = [
         INPUT { r#type: INPUT_MOUSE, Anonymous: windows::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {

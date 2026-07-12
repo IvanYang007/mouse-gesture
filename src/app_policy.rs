@@ -196,3 +196,56 @@ pub fn validate_target(
 
     true
 }
+
+// ── Tests ───────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::BlacklistMode;
+
+    #[test]
+    fn snapshot_lookup_known_pid() {
+        let mut snapshot = PolicySnapshot {
+            mode: BlacklistMode::Blacklist,
+            generation: 1,
+            known_pids: std::collections::HashMap::new(),
+        };
+        snapshot.known_pids.insert(1234, Eligibility::Denied);
+        assert_eq!(snapshot.lookup(1234), Some(Eligibility::Denied));
+        assert_eq!(snapshot.lookup(5678), None);
+    }
+
+    #[test]
+    fn snapshot_default_blacklist_allows_unknown() {
+        let snapshot = PolicySnapshot {
+            mode: BlacklistMode::Blacklist,
+            generation: 1,
+            known_pids: std::collections::HashMap::new(),
+        };
+        assert_eq!(snapshot.default_for_unknown(), Eligibility::Allowed);
+    }
+
+    #[test]
+    fn snapshot_default_whitelist_denies_unknown() {
+        let snapshot = PolicySnapshot {
+            mode: BlacklistMode::Whitelist,
+            generation: 1,
+            known_pids: std::collections::HashMap::new(),
+        };
+        assert_eq!(snapshot.default_for_unknown(), Eligibility::Denied);
+    }
+
+    #[test]
+    fn publish_and_read_snapshot() {
+        let snapshot = PolicySnapshot {
+            mode: BlacklistMode::Blacklist,
+            generation: 42,
+            known_pids: std::collections::HashMap::new(),
+        };
+        publish_snapshot(snapshot);
+        let loaded = get_snapshot().expect("snapshot should be published");
+        assert_eq!(loaded.generation, 42);
+        assert_eq!(loaded.mode, BlacklistMode::Blacklist);
+    }
+}
