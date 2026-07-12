@@ -176,6 +176,11 @@ pub const MAX_TOKENS: usize = 32;
 pub const MAX_ACTION_QUEUE: usize = 16;
 
 impl ConfigFile {
+    /// Parse a TOML config from a string (used by the editor for validation).
+    pub fn parse(text: &str) -> Result<Self> {
+        toml::from_str(text).context("parsing config TOML")
+    }
+
     /// Parse a TOML config file.
     pub fn load(path: &Path) -> Result<Self> {
         // Limit config file size to 1 MiB to prevent OOM on malformed/symlink files

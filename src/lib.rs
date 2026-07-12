@@ -4,6 +4,7 @@
 pub mod app_policy;
 pub mod autostart;
 pub mod config;
+pub mod config_editor;
 pub mod gesture;
 pub mod input_hook;
 pub mod input_inject;
