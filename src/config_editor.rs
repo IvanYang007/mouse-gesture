@@ -1,28 +1,35 @@
-//! Native Win32 editor window for editing `config.toml`.
+//! Native Win32 structured editor window for editing `config.toml`.
 //!
-//! Uses EDIT + BUTTON child controls. Single-editor enforcement
-//! via a global `AtomicIsize`. Saves atomically (temp file + rename)
-//! and posts `WM_APP_RELOAD_CONFIG` to the owner daemon window.
+//! Provides a structured GUI with a ListView for gestures, a form panel
+//! for adding/editing/deleting gesture mappings, and a settings panel —
+//! using `toml_edit` for comment-preserving TOML round-trips.
+//!
+//! Single-editor enforcement via a global `AtomicIsize`.
 
-use crate::config::ConfigFile;
 use anyhow::Result;
-use log::{error, info};
+use log::info;
+use std::mem::size_of;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use toml_edit::DocumentMut;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, DeleteObject, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY,
+    CreateFontW, DeleteObject, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY, HFONT,
     OUT_DEFAULT_PRECIS,
+};
+use windows::Win32::UI::Controls::{
+    InitCommonControlsEx, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, LVS_REPORT,
+    LVS_SHOWSELALWAYS, LVS_SINGLESEL, WC_LISTVIEW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
-    GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, PostMessageW, RegisterClassExW,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
-    BS_PUSHBUTTON, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_LEFT, ES_MULTILINE, ES_WANTRETURN,
-    GWLP_USERDATA, HMENU, MB_ICONERROR, MB_OK, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER, SW_SHOW,
-    WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND, WM_NCDESTROY, WM_SETFONT, WM_SIZE,
-    WNDCLASSEXW, WS_CHILD, WS_EX_CLIENTEDGE, WS_HSCROLL, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
-    WS_VSCROLL,
+    GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, RegisterClassExW,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+    BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBS_DROPDOWNLIST, ES_AUTOHSCROLL, ES_LEFT, ES_MULTILINE,
+    ES_WANTRETURN, GWLP_USERDATA, HMENU, MB_ICONERROR, MB_OK, SM_CXSCREEN, SM_CYSCREEN,
+    SWP_NOZORDER, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD, WS_EX_CLIENTEDGE,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
 };
 
 const EDITOR_CLASS: &str = "MouseGestureEditor\0";
@@ -35,20 +42,66 @@ const WM_APP_RELOAD_CONFIG: u32 = WM_APP + 20;
 /// Global handle to the single editor window (or 0 if none).
 static EDITOR_HWND: AtomicIsize = AtomicIsize::new(0);
 
-/// Per-editor state stored via `GWLP_USERDATA`.
+// ── Control IDs ────────────────────────────────────────────────
+
+const ID_LISTVIEW: u16 = 1000;
+const ID_EDIT_NAME: u16 = 1001;
+const ID_EDIT_PATTERN: u16 = 1002;
+const ID_COMBO_ACTION_TYPE: u16 = 1003;
+const ID_EDIT_ACTION: u16 = 1004;
+const ID_BTN_ADD: u16 = 1005;
+const ID_BTN_CLEAR: u16 = 1006;
+const ID_BTN_DELETE: u16 = 1007;
+const ID_EDIT_THRESHOLD: u16 = 1010;
+const ID_EDIT_SAMPLE: u16 = 1011;
+const ID_EDIT_EPSILON: u16 = 1012;
+const ID_EDIT_MIN_LEN: u16 = 1013;
+const ID_CHECK_DEBUG: u16 = 1014;
+const ID_CHECK_STARTUP: u16 = 1015;
+const ID_COMBO_BLACKLIST_MODE: u16 = 1020;
+const ID_EDIT_BLACKLIST_APPS: u16 = 1021;
+const ID_COMBO_WINDOW_CMD: u16 = 1030;
+const ID_EDIT_LAUNCH_PATH: u16 = 1031;
+const ID_EDIT_LAUNCH_ARGS: u16 = 1032;
+
+// ── EditorState ────────────────────────────────────────────────
+
+#[allow(dead_code)]
 struct EditorState {
-    /// Daemon window to post `WM_APP_RELOAD_CONFIG` to after save.
     owner: HWND,
-    /// Path to the config file.
     path: PathBuf,
-    /// Handle to the EDIT child control.
-    edit: HWND,
-    /// Handle to the Save button.
-    save_button: HWND,
-    /// Handle to the Cancel button.
-    cancel_button: HWND,
-    /// Editor font handle — freed in WM_NCDESTROY.
-    font: windows::Win32::Graphics::Gdi::HFONT,
+    config: DocumentMut,
+    gesture_names: Vec<String>,
+    selected_index: Option<usize>,
+    dirty: bool,
+    h_listview: HWND,
+    // Settings panel
+    h_edit_threshold: HWND,
+    h_edit_sample: HWND,
+    h_edit_epsilon: HWND,
+    h_edit_min_len: HWND,
+    h_check_debug: HWND,
+    h_check_startup: HWND,
+    // Blacklist
+    h_blacklist_mode: HWND,
+    h_blacklist_apps: HWND,
+    // Gesture form
+    h_edit_name: HWND,
+    h_edit_pattern: HWND,
+    h_combo_action_type: HWND,
+    // Action-specific controls
+    h_edit_action: HWND,
+    h_combo_window_cmd: HWND,
+    h_edit_launch_path: HWND,
+    h_edit_launch_args: HWND,
+    // Buttons
+    h_btn_add: HWND,
+    h_btn_clear: HWND,
+    h_btn_delete: HWND,
+    h_btn_save: HWND,
+    h_btn_cancel: HWND,
+    // Font
+    h_font: HFONT,
 }
 
 // ── Public API ─────────────────────────────────────────────────
@@ -75,9 +128,20 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     // Register the editor window class
     register_class()?;
 
-    // Read config file as raw UTF-8 (not ConfigFile::load — that would
-    // reject invalid TOML and prevent the editor from opening for recovery).
+    // Initialize common controls for ListView
+    let icc = INITCOMMONCONTROLSEX {
+        dwSize: size_of::<INITCOMMONCONTROLSEX>() as u32,
+        dwICC: ICC_LISTVIEW_CLASSES,
+    };
+    unsafe {
+        let _ = InitCommonControlsEx(&icc);
+    }
+
+    // Read config file and parse into DocumentMut
     let config_text = std::fs::read_to_string(&path).unwrap_or_default();
+    let config: DocumentMut = config_text
+        .parse()
+        .unwrap_or_else(|_| DocumentMut::new());
 
     // Center on primary monitor
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
@@ -106,14 +170,92 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     }
     .map_err(|e| anyhow::anyhow!("CreateWindowExW failed: {:?}", e))?;
 
-    // Create the EDIT control (combine WINDOW_STYLE + EDIT_CONTROL_STYLE via raw u32)
-    let edit: HWND = {
+    // ── Create child controls ───────────────────────────────
+
+    // ListView on the left
+    let lv_style = WINDOW_STYLE(
+        WS_CHILD.0 | WS_VISIBLE.0 | WS_VSCROLL.0
+            | LVS_REPORT
+            | LVS_SINGLESEL
+            | LVS_SHOWSELALWAYS,
+    );
+    let h_listview = unsafe {
+        CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            WC_LISTVIEW,
+            windows::core::w!(""),
+            lv_style,
+            5,
+            5,
+            530,
+            375,
+            Some(hwnd),
+            Some(HMENU(ID_LISTVIEW as isize as *mut _)),
+            None,
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("CreateWindowExW (ListView) failed: {:?}", e))?;
+
+    // ── Right-side gesture form ─────────────────────────────
+
+    create_label(hwnd, "Gesture Name:", 545, 10, 100, 16)?;
+    let h_edit_name = create_edit(hwnd, ID_EDIT_NAME, 545, 28, 245, 22)?;
+
+    create_label(hwnd, "Pattern:", 545, 55, 100, 16)?;
+    let h_edit_pattern = create_edit(hwnd, ID_EDIT_PATTERN, 545, 73, 245, 22)?;
+
+    create_label(hwnd, "Action Type:", 545, 100, 100, 16)?;
+    let h_combo_action_type = create_combo(hwnd, ID_COMBO_ACTION_TYPE, 545, 118, 245, 200)?;
+
+    // Action-specific controls (initially hidden)
+    let h_edit_action = create_edit(hwnd, ID_EDIT_ACTION, 545, 148, 245, 22)?;
+    let h_combo_window_cmd = create_combo(hwnd, ID_COMBO_WINDOW_CMD, 545, 148, 245, 200)?;
+    let h_edit_launch_path = create_edit(hwnd, ID_EDIT_LAUNCH_PATH, 545, 148, 245, 22)?;
+    let h_edit_launch_args = create_edit(hwnd, ID_EDIT_LAUNCH_ARGS, 545, 178, 245, 22)?;
+
+    // Form buttons
+    let h_btn_add = create_button(hwnd, ID_BTN_ADD, "&Add", 545, 340, 75, 25)?;
+    let h_btn_clear = create_button(hwnd, ID_BTN_CLEAR, "&Clear", 628, 340, 75, 25)?;
+    let h_btn_delete = create_button(hwnd, ID_BTN_DELETE, "&Delete", 711, 340, 75, 25)?;
+
+    // ── Settings panel (bottom) ─────────────────────────────
+
+    // Divider line
+    create_label(hwnd, "──────────────────────────────────────", 5, 385, 530, 16)?;
+    create_label(hwnd, "Settings", 5, 405, 60, 16)?;
+
+    // Row 1: Threshold, Sample, Epsilon
+    create_label(hwnd, "Threshold:", 5, 425, 60, 16)?;
+    let h_edit_threshold = create_edit(hwnd, ID_EDIT_THRESHOLD, 68, 423, 60, 22)?;
+
+    create_label(hwnd, "Sample:", 138, 425, 50, 16)?;
+    let h_edit_sample = create_edit(hwnd, ID_EDIT_SAMPLE, 188, 423, 60, 22)?;
+
+    create_label(hwnd, "Epsilon:", 258, 425, 50, 16)?;
+    let h_edit_epsilon = create_edit(hwnd, ID_EDIT_EPSILON, 308, 423, 60, 22)?;
+
+    // Row 2: Min Len, Debug, Startup
+    create_label(hwnd, "Min Len:", 5, 452, 55, 16)?;
+    let h_edit_min_len = create_edit(hwnd, ID_EDIT_MIN_LEN, 60, 450, 50, 22)?;
+
+    let h_check_debug = create_checkbox(hwnd, ID_CHECK_DEBUG, "Debug logging", 130, 450, 120, 22)?;
+    let h_check_startup =
+        create_checkbox(hwnd, ID_CHECK_STARTUP, "Start with Windows", 260, 450, 140, 22)?;
+
+    // ── Blacklist section ───────────────────────────────────
+
+    create_label(hwnd, "Blacklist", 5, 480, 60, 16)?;
+    create_label(hwnd, "Mode:", 5, 498, 40, 16)?;
+    let h_blacklist_mode = create_combo(hwnd, ID_COMBO_BLACKLIST_MODE, 45, 496, 120, 200)?;
+
+    create_label(hwnd, "Apps:", 175, 498, 40, 16)?;
+    let h_blacklist_apps = {
         let edit_class: Vec<u16> = "EDIT\0".encode_utf16().collect();
         let style = WINDOW_STYLE(
-            (WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL).0
+            (WS_CHILD | WS_VISIBLE | WS_VSCROLL).0
                 | (ES_LEFT as u32)
                 | (ES_MULTILINE as u32)
-                | (ES_AUTOVSCROLL as u32)
                 | (ES_AUTOHSCROLL as u32)
                 | (ES_WANTRETURN as u32),
         );
@@ -123,73 +265,31 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
                 windows::core::PCWSTR::from_raw(edit_class.as_ptr()),
                 windows::core::w!(""),
                 style,
-                0,
-                0,
-                0,
-                0,
+                220,
+                496,
+                300,
+                50,
                 Some(hwnd),
-                None,
+                Some(HMENU(ID_EDIT_BLACKLIST_APPS as isize as *mut _)),
                 None,
                 None,
             )
         }
     }
-    .map_err(|e| anyhow::anyhow!("CreateWindowExW (EDIT) failed: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("CreateWindowExW (blacklist apps EDIT) failed: {:?}", e))?;
 
-    // Create Save button (ID 1)
-    let save_button: HWND = {
-        let btn_class: Vec<u16> = "BUTTON\0".encode_utf16().collect();
-        let label: Vec<u16> = "&Save\0".encode_utf16().collect();
-        let style = WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0 | (BS_PUSHBUTTON as u32));
-        unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR::from_raw(btn_class.as_ptr()),
-                windows::core::PCWSTR::from_raw(label.as_ptr()),
-                style,
-                0,
-                0,
-                0,
-                0,
-                Some(hwnd),
-                Some(HMENU(1isize as *mut _)),
-                None,
-                None,
-            )
-        }
-    }
-    .map_err(|e| anyhow::anyhow!("CreateWindowExW (Save button) failed: {:?}", e))?;
+    // ── Save / Cancel buttons (bottom-right) ────────────────
 
-    // Create Cancel button (ID 2)
-    let cancel_button: HWND = {
-        let btn_class: Vec<u16> = "BUTTON\0".encode_utf16().collect();
-        let label: Vec<u16> = "Cancel\0".encode_utf16().collect();
-        let style = WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0 | (BS_PUSHBUTTON as u32));
-        unsafe {
-            CreateWindowExW(
-                WINDOW_EX_STYLE::default(),
-                windows::core::PCWSTR::from_raw(btn_class.as_ptr()),
-                windows::core::PCWSTR::from_raw(label.as_ptr()),
-                style,
-                0,
-                0,
-                0,
-                0,
-                Some(hwnd),
-                Some(HMENU(2isize as *mut _)),
-                None,
-                None,
-            )
-        }
-    }
-    .map_err(|e| anyhow::anyhow!("CreateWindowExW (Cancel button) failed: {:?}", e))?;
+    let h_btn_cancel = create_button(hwnd, 2, "Cancel", 620, 565, 80, 25)?;
+    let h_btn_save = create_button(hwnd, 1, "&Save", 710, 565, 80, 25)?;
 
-    // Set a reasonable monospace font on the edit control
-    let font = {
-        let face: Vec<u16> = "Consolas\0".encode_utf16().collect();
+    // ── Font ────────────────────────────────────────────────
+
+    let h_font = {
+        let face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
         unsafe {
             CreateFontW(
-                18,
+                16,
                 0,
                 0,
                 0,
@@ -206,35 +306,51 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
             )
         }
     };
-    if !font.is_invalid() {
+
+    // Apply font to relevant controls
+    if !h_font.is_invalid() {
         unsafe {
             SendMessageW(
-                edit,
+                h_listview,
                 WM_SETFONT,
-                Some(WPARAM(font.0 as usize)),
+                Some(WPARAM(h_font.0 as usize)),
                 Some(LPARAM(1)),
             );
         }
     }
 
-    // Fill the edit control with the config text
-    let text_wide: Vec<u16> = config_text
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
-    unsafe {
-        let _ = SetWindowTextW(edit, windows::core::PCWSTR::from_raw(text_wide.as_ptr()));
-    }
+    // ── Store state ─────────────────────────────────────────
 
-    // Create and store EditorState
     let path_display = path.display().to_string();
     let state = Box::new(EditorState {
         owner,
         path,
-        edit,
-        save_button,
-        cancel_button,
-        font,
+        config,
+        gesture_names: Vec::new(),
+        selected_index: None,
+        dirty: false,
+        h_listview,
+        h_edit_threshold,
+        h_edit_sample,
+        h_edit_epsilon,
+        h_edit_min_len,
+        h_check_debug,
+        h_check_startup,
+        h_blacklist_mode,
+        h_blacklist_apps,
+        h_edit_name,
+        h_edit_pattern,
+        h_combo_action_type,
+        h_edit_action,
+        h_combo_window_cmd,
+        h_edit_launch_path,
+        h_edit_launch_args,
+        h_btn_add,
+        h_btn_clear,
+        h_btn_delete,
+        h_btn_save,
+        h_btn_cancel,
+        h_font,
     });
     let state_ptr = Box::into_raw(state);
     unsafe { SetWindowLongPtrW(hwnd, GWLP_USERDATA, state_ptr as isize) };
@@ -251,12 +367,161 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     Ok(())
 }
 
+// ── Control Creation Helpers ───────────────────────────────────
+
+/// Create a STATIC label control.
+fn create_label(parent: HWND, text: &str, x: i32, y: i32, w: i32, h: i32) -> Result<HWND> {
+    let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+    let label_wide: Vec<u16> = text
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let style = WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0);
+    unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            windows::core::PCWSTR::from_raw(class.as_ptr()),
+            windows::core::PCWSTR::from_raw(label_wide.as_ptr()),
+            style,
+            x,
+            y,
+            w,
+            h,
+            Some(parent),
+            None,
+            None,
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("CreateWindowExW (STATIC) failed: {:?}", e))
+}
+
+/// Create a single-line EDIT control.
+fn create_edit(parent: HWND, id: u16, x: i32, y: i32, w: i32, h: i32) -> Result<HWND> {
+    let class: Vec<u16> = "EDIT\0".encode_utf16().collect();
+    let style = WINDOW_STYLE(
+        (WS_CHILD | WS_VISIBLE).0 | (ES_LEFT as u32) | (ES_AUTOHSCROLL as u32),
+    );
+    unsafe {
+        CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            windows::core::PCWSTR::from_raw(class.as_ptr()),
+            windows::core::w!(""),
+            style,
+            x,
+            y,
+            w,
+            h,
+            Some(parent),
+            Some(HMENU(id as isize as *mut _)),
+            None,
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("CreateWindowExW (EDIT) failed: {:?}", e))
+}
+
+/// Create a dropdown COMBOBOX control.
+fn create_combo(parent: HWND, id: u16, x: i32, y: i32, w: i32, h: i32) -> Result<HWND> {
+    let class: Vec<u16> = "COMBOBOX\0".encode_utf16().collect();
+    let style = WINDOW_STYLE(
+        (WS_CHILD | WS_VISIBLE).0 | (CBS_DROPDOWNLIST as u32),
+    );
+    unsafe {
+        CreateWindowExW(
+            WS_EX_CLIENTEDGE,
+            windows::core::PCWSTR::from_raw(class.as_ptr()),
+            windows::core::w!(""),
+            style,
+            x,
+            y,
+            w,
+            h,
+            Some(parent),
+            Some(HMENU(id as isize as *mut _)),
+            None,
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("CreateWindowExW (COMBOBOX) failed: {:?}", e))
+}
+
+/// Create a push BUTTON control.
+fn create_button(
+    parent: HWND,
+    id: u16,
+    text: &str,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Result<HWND> {
+    let class: Vec<u16> = "BUTTON\0".encode_utf16().collect();
+    let label_wide: Vec<u16> = text
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let style = WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0 | (BS_PUSHBUTTON as u32));
+    unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            windows::core::PCWSTR::from_raw(class.as_ptr()),
+            windows::core::PCWSTR::from_raw(label_wide.as_ptr()),
+            style,
+            x,
+            y,
+            w,
+            h,
+            Some(parent),
+            Some(HMENU(id as isize as *mut _)),
+            None,
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("CreateWindowExW (BUTTON) failed: {:?}", e))
+}
+
+/// Create a checkbox (BUTTON with `BS_AUTOCHECKBOX` style).
+fn create_checkbox(
+    parent: HWND,
+    id: u16,
+    text: &str,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> Result<HWND> {
+    let class: Vec<u16> = "BUTTON\0".encode_utf16().collect();
+    let label_wide: Vec<u16> = text
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let style = WINDOW_STYLE((WS_CHILD | WS_VISIBLE).0 | (BS_AUTOCHECKBOX as u32));
+    unsafe {
+        CreateWindowExW(
+            WINDOW_EX_STYLE::default(),
+            windows::core::PCWSTR::from_raw(class.as_ptr()),
+            windows::core::PCWSTR::from_raw(label_wide.as_ptr()),
+            style,
+            x,
+            y,
+            w,
+            h,
+            Some(parent),
+            Some(HMENU(id as isize as *mut _)),
+            None,
+            None,
+        )
+    }
+    .map_err(|e| anyhow::anyhow!("CreateWindowExW (CHECKBOX) failed: {:?}", e))
+}
+
 // ── Window Class Registration ──────────────────────────────────
 
 fn register_class() -> Result<()> {
     let name: Vec<u16> = EDITOR_CLASS.encode_utf16().collect();
     let wc = WNDCLASSEXW {
-        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        cbSize: size_of::<WNDCLASSEXW>() as u32,
         style: windows::Win32::UI::WindowsAndMessaging::CS_HREDRAW
             | windows::Win32::UI::WindowsAndMessaging::CS_VREDRAW,
         lpfnWndProc: Some(editor_proc),
@@ -290,8 +555,8 @@ unsafe extern "system" fn editor_proc(
             if !state_ptr.is_null() {
                 unsafe {
                     let state = Box::from_raw(state_ptr);
-                    if !state.font.is_invalid() {
-                        let _ = DeleteObject(state.font.into());
+                    if !state.h_font.is_invalid() {
+                        let _ = DeleteObject(state.h_font.into());
                     }
                 }
             }
@@ -310,25 +575,26 @@ unsafe extern "system" fn editor_proc(
             let client_w = (lparam.0 as u32 & 0xffff) as i32;
             let client_h = ((lparam.0 as u32 >> 16) & 0xffff) as i32;
 
-            // Edit control fills the client area above the button row
+            // ListView: left side, fills most of the height
+            let lv_w = client_w * 2 / 3;
+            let lv_h = client_h - 220;
             unsafe {
                 let _ = SetWindowPos(
-                    state.edit,
+                    state.h_listview,
                     None,
                     5,
                     5,
-                    client_w - 10,
-                    client_h - 45,
+                    lv_w - 10,
+                    lv_h,
                     SWP_NOZORDER,
                 );
             }
 
-            // Button row at bottom-right
+            // Save / Cancel buttons: bottom-right
             let btn_y = client_h - 35;
-            // Cancel button (left of Save)
             unsafe {
                 let _ = SetWindowPos(
-                    state.cancel_button,
+                    state.h_btn_cancel,
                     None,
                     client_w - 180,
                     btn_y,
@@ -336,11 +602,8 @@ unsafe extern "system" fn editor_proc(
                     25,
                     SWP_NOZORDER,
                 );
-            }
-            // Save button (rightmost)
-            unsafe {
                 let _ = SetWindowPos(
-                    state.save_button,
+                    state.h_btn_save,
                     None,
                     client_w - 90,
                     btn_y,
@@ -356,7 +619,9 @@ unsafe extern "system" fn editor_proc(
         WM_COMMAND => {
             let cmd = (wparam.0 as u32 & 0xffff) as u16;
             match cmd {
-                1 => handle_save(hwnd),
+                1 => {
+                    // Save — placeholder
+                }
                 2 => unsafe {
                     let _ = DestroyWindow(hwnd);
                 },
@@ -365,84 +630,18 @@ unsafe extern "system" fn editor_proc(
             LRESULT(0)
         }
 
+        WM_NOTIFY => {
+            // Placeholder — will handle ListView selection changes in U3
+            LRESULT(0)
+        }
+
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
-// ── Save Logic ─────────────────────────────────────────────────
-
-fn handle_save(hwnd: HWND) {
-    let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
-    if state_ptr.is_null() {
-        error!("handle_save: state_ptr is null");
-        return;
-    }
-    let state = unsafe { &*state_ptr };
-
-    // Read text from the edit control
-    let text = match read_edit_text(state.edit) {
-        Ok(t) => t,
-        Err(e) => {
-            error!("Failed to read editor text: {}", e);
-            show_error(hwnd, &format!("Failed to read text: {}", e));
-            return;
-        }
-    };
-
-    // Validate: parse TOML + compile
-    let cfg = match ConfigFile::parse(&text) {
-        Ok(c) => c,
-        Err(e) => {
-            show_error(hwnd, &format!("Invalid TOML:\n\n{}", e));
-            return;
-        }
-    };
-
-    match cfg.compile(1, 96) {
-        Ok(_) => {}
-        Err(e) => {
-            show_error(hwnd, &format!("Invalid configuration:\n\n{}", e));
-            return;
-        }
-    }
-
-    // Atomic save: write to temp, then rename
-    let tmp_path = state.path.with_extension("toml.tmp");
-    if let Some(parent) = state.path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            error!("Failed to create config directory: {}", e);
-            show_error(hwnd, &format!("Failed to create directory:\n\n{}", e));
-            return;
-        }
-    }
-
-    if let Err(e) = std::fs::write(&tmp_path, &text) {
-        error!("Failed to write config: {}", e);
-        show_error(hwnd, &format!("Failed to write file:\n\n{}", e));
-        return;
-    }
-
-    if let Err(e) = std::fs::rename(&tmp_path, &state.path) {
-        error!("Failed to rename config: {}", e);
-        show_error(hwnd, &format!("Failed to save file:\n\n{}", e));
-        return;
-    }
-
-    // Post reload message to the daemon window
-    unsafe {
-        let _ = PostMessageW(
-            Some(state.owner),
-            WM_APP_RELOAD_CONFIG,
-            WPARAM::default(),
-            LPARAM::default(),
-        );
-    }
-
-    info!("Config saved: {}", state.path.display());
-}
-
 // ── Helpers ────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 /// Read the entire text content of an EDIT control.
 fn read_edit_text(edit: HWND) -> Result<String> {
     let len = unsafe { GetWindowTextLengthW(edit) as usize };
