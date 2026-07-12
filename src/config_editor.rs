@@ -271,7 +271,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     let h_edit_launch_args = create_edit(hwnd, ID_EDIT_LAUNCH_ARGS, 545, 178, 245, 22)?;
 
     // Placeholder label (shown when no gesture selected)
-    let h_placeholder = create_label(hwnd, "Select a gesture or click Add", 545, 10, 245, 80)?;
+    let h_placeholder = create_label(hwnd, "Select a gesture or click Add", 545, 10, 260, 80)?;
 
     // Form buttons
     let h_btn_add = create_button(hwnd, ID_BTN_ADD, "&Add", 545, 340, 75, 25)?;
@@ -292,14 +292,14 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     let h_label_settings = create_label(hwnd, "Settings", 5, 405, 60, 16)?;
 
     // Row 1: Threshold, Sample, Epsilon
-    let h_label_threshold = create_label(hwnd, "Threshold:", 5, 425, 60, 16)?;
-    let h_edit_threshold = create_edit(hwnd, ID_EDIT_THRESHOLD, 68, 423, 60, 22)?;
+    let h_label_threshold = create_label(hwnd, "Threshold:", 5, 425, 75, 16)?;
+    let h_edit_threshold = create_edit(hwnd, ID_EDIT_THRESHOLD, 83, 423, 60, 22)?;
 
-    let h_label_sample = create_label(hwnd, "Sample:", 138, 425, 50, 16)?;
-    let h_edit_sample = create_edit(hwnd, ID_EDIT_SAMPLE, 188, 423, 60, 22)?;
+    let h_label_sample = create_label(hwnd, "Sample:", 153, 425, 55, 16)?;
+    let h_edit_sample = create_edit(hwnd, ID_EDIT_SAMPLE, 208, 423, 60, 22)?;
 
-    let h_label_epsilon = create_label(hwnd, "Epsilon:", 258, 425, 50, 16)?;
-    let h_edit_epsilon = create_edit(hwnd, ID_EDIT_EPSILON, 308, 423, 60, 22)?;
+    let h_label_epsilon = create_label(hwnd, "Epsilon:", 280, 425, 55, 16)?;
+    let h_edit_epsilon = create_edit(hwnd, ID_EDIT_EPSILON, 338, 423, 60, 22)?;
 
     // Row 2: Min Len, Debug, Startup
     let h_label_min_len = create_label(hwnd, "Min Len:", 5, 452, 55, 16)?;
