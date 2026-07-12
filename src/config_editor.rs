@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use toml_edit::DocumentMut;
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     CreateFontW, DeleteObject, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_QUALITY, HFONT,
     OUT_DEFAULT_PRECIS,
@@ -29,15 +29,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, PostMessageW, RegisterClassExW,
-    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, SetWindowTextW, ShowWindow,
+    SendMessageW, SetForegroundWindow, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE,
     CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, EN_CHANGE, ES_AUTOHSCROLL, ES_LEFT,
     ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, HMENU, IDCANCEL, IDNO, IDYES, MB_ICONERROR,
-    MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL, MINMAXINFO, SM_CXSCREEN, SM_CYSCREEN, SWP_NOCOPYBITS,
-    SWP_NOZORDER,
+    MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL, SM_CXSCREEN, SM_CYSCREEN,
     SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
-    WM_GETMINMAXINFO, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD,
-    WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
+    WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD,
+    WS_EX_CLIENTEDGE, WS_OVERLAPPED, WS_CAPTION, WS_SYSMENU, WS_MINIMIZEBOX, WS_VISIBLE, WS_VSCROLL,
 };
 
 const EDITOR_CLASS: &str = "MouseGestureEditor\0";
@@ -180,7 +179,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
             WINDOW_EX_STYLE::default(),
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPEDWINDOW | WINDOW_STYLE(0x02000000), // WS_CLIPCHILDREN to prevent resize flicker/doubling
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WINDOW_STYLE(0x02000000), // WS_CLIPCHILDREN
             x,
             y,
             EDITOR_W,
@@ -694,350 +693,8 @@ unsafe extern "system" fn editor_proc(
             LRESULT(0)
         }
 
-        WM_GETMINMAXINFO => {
-            let minmax = &mut *(lparam.0 as *mut MINMAXINFO);
-            minmax.ptMinTrackSize = POINT { x: 700, y: 500 };
-            LRESULT(0)
-        }
-
         WM_SIZE => {
-            let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut EditorState };
-            if state_ptr.is_null() {
-                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
-            }
-            let state = unsafe { &*state_ptr };
-
-            let client_w = (lparam.0 as u32 & 0xffff) as i32;
-            let client_h = ((lparam.0 as u32 >> 16) & 0xffff) as i32;
-
-            // ── Top section ────────────────────────────────
-            let top_h = client_h - 220;
-
-            // ListView: left 2/3, fills from top to settings
-            let lv_w = client_w * 2 / 3 - 15;
-            unsafe {
-                let _ = SetWindowPos(state.h_listview, None, 5, 5, lv_w, top_h - 10, SWP_NOZORDER | SWP_NOCOPYBITS);
-            }
-
-            // ── Form panel: right 1/3 ──────────────────────
-            let form_x = client_w * 2 / 3 + 5;
-            let form_w = client_w / 3 - 10;
-            let ctrl_w = form_w - 5;
-
-            unsafe {
-                // Labels and edits
-                let _ = SetWindowPos(
-                    state.h_label_gesture_name,
-                    None,
-                    form_x,
-                    10,
-                    form_w,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_edit_name,
-                    None,
-                    form_x,
-                    28,
-                    ctrl_w,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_label_pattern,
-                    None,
-                    form_x,
-                    55,
-                    form_w,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_edit_pattern,
-                    None,
-                    form_x,
-                    73,
-                    ctrl_w,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_label_action_type,
-                    None,
-                    form_x,
-                    100,
-                    form_w,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_combo_action_type,
-                    None,
-                    form_x,
-                    118,
-                    ctrl_w,
-                    200,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-
-                // Action-specific controls
-                let _ = SetWindowPos(
-                    state.h_edit_action,
-                    None,
-                    form_x,
-                    148,
-                    ctrl_w,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_combo_window_cmd,
-                    None,
-                    form_x,
-                    148,
-                    ctrl_w,
-                    200,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_edit_launch_path,
-                    None,
-                    form_x,
-                    148,
-                    ctrl_w,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_edit_launch_args,
-                    None,
-                    form_x,
-                    178,
-                    ctrl_w,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-
-                // Placeholder
-                let _ = SetWindowPos(
-                    state.h_placeholder,
-                    None,
-                    form_x,
-                    10,
-                    form_w,
-                    80,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-
-                // Form buttons
-                let _ = SetWindowPos(state.h_btn_add, None, form_x, 340, 75, 25, SWP_NOZORDER | SWP_NOCOPYBITS);
-                let _ = SetWindowPos(
-                    state.h_btn_clear,
-                    None,
-                    form_x + 83,
-                    340,
-                    75,
-                    25,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_btn_delete,
-                    None,
-                    form_x + 166,
-                    340,
-                    75,
-                    25,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-            }
-
-            // ── Settings panel (bottom) ─────────────────────
-            let settings_y = client_h - 220;
-
-            unsafe {
-                let _ = SetWindowPos(
-                    state.h_label_divider,
-                    None,
-                    5,
-                    settings_y + 5,
-                    client_w - 10,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_label_settings,
-                    None,
-                    5,
-                    settings_y + 25,
-                    60,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-
-                // Row 1: Threshold, Sample, Epsilon
-                let _ = SetWindowPos(
-                    state.h_label_threshold,
-                    None,
-                    5,
-                    settings_y + 45,
-                    60,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_edit_threshold,
-                    None,
-                    68,
-                    settings_y + 43,
-                    60,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_label_sample,
-                    None,
-                    138,
-                    settings_y + 45,
-                    50,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_edit_sample,
-                    None,
-                    188,
-                    settings_y + 43,
-                    60,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_label_epsilon,
-                    None,
-                    258,
-                    settings_y + 45,
-                    50,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_edit_epsilon,
-                    None,
-                    308,
-                    settings_y + 43,
-                    60,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-
-                // Row 2: Min Len, Debug, Startup
-                let _ = SetWindowPos(
-                    state.h_label_min_len,
-                    None,
-                    5,
-                    settings_y + 72,
-                    55,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_edit_min_len,
-                    None,
-                    60,
-                    settings_y + 70,
-                    50,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_check_debug,
-                    None,
-                    130,
-                    settings_y + 70,
-                    120,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_check_startup,
-                    None,
-                    260,
-                    settings_y + 70,
-                    140,
-                    22,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-
-                // ── Blacklist section ───────────────────────
-                let _ = SetWindowPos(
-                    state.h_label_blacklist,
-                    None,
-                    5,
-                    settings_y + 100,
-                    60,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_label_blacklist_mode,
-                    None,
-                    5,
-                    settings_y + 118,
-                    40,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_blacklist_mode,
-                    None,
-                    45,
-                    settings_y + 116,
-                    120,
-                    200,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_label_blacklist_apps,
-                    None,
-                    175,
-                    settings_y + 118,
-                    40,
-                    16,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_blacklist_apps,
-                    None,
-                    220,
-                    settings_y + 116,
-                    client_w - 230,
-                    50,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-
-                // ── Save / Cancel buttons ───────────────────
-                let btn_y = client_h - 35;
-                let _ = SetWindowPos(
-                    state.h_btn_cancel,
-                    None,
-                    client_w - 180,
-                    btn_y,
-                    80,
-                    25,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-                let _ = SetWindowPos(
-                    state.h_btn_save,
-                    None,
-                    client_w - 90,
-                    btn_y,
-                    80,
-                    25,
-                    SWP_NOZORDER | SWP_NOCOPYBITS,
-                );
-            }
-
+            // Fixed-size window — no resize logic needed.
             LRESULT(0)
         }
 
