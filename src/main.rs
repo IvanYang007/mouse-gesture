@@ -352,7 +352,7 @@ fn execute_window_action(cmd: &WindowCommand, target_hwnd: HWND) {
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetWindowPos, ShowWindowAsync,
         PostMessageW, SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE, HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, IsWindow};
     use windows::Win32::UI::WindowsAndMessaging::WM_CLOSE;
-    use windows::Win32::Foundation::{WPARAM, LPARAM, HWND as HWND2};
+    use windows::Win32::Foundation::{WPARAM, LPARAM};
 
     // Validate target_hwnd — fall back to foreground if invalid
     let hwnd = if target_hwnd.is_invalid() || !unsafe { IsWindow(Some(target_hwnd)).as_bool() } {
