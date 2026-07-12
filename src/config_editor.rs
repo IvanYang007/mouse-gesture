@@ -22,7 +22,7 @@ use windows::Win32::UI::Controls::{
     InitCommonControlsEx, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, LVCF_TEXT, LVCOLUMNW,
     LVIF_STATE, LVIF_TEXT, LVIS_SELECTED, LVITEMW, LVM_DELETEALLITEMS, LVM_DELETEITEM,
     LVM_GETITEMCOUNT, LVM_GETNEXTITEM, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
-    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMW, LVN_ITEMCHANGED, LVS_EX_FULLROWSELECT, LVS_REPORT,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMW, LVM_SETCOLUMNWIDTH, LVN_ITEMCHANGED, LVS_EX_FULLROWSELECT, LVS_REPORT,
     LVS_SHOWSELALWAYS, LVS_SINGLESEL, NMHDR, NMLISTVIEW, WC_LISTVIEW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetFocus};
@@ -179,7 +179,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
             WINDOW_EX_STYLE::default(),
             PCWSTR::from_raw(class_name.as_ptr()),
             PCWSTR::from_raw(title.as_ptr()),
-            WS_OVERLAPPEDWINDOW,
+            WS_OVERLAPPEDWINDOW | WINDOW_STYLE(0x02000000), // WS_CLIPCHILDREN to prevent resize flicker/doubling
             x,
             y,
             EDITOR_W,
@@ -1334,6 +1334,14 @@ fn populate_listview(state: &EditorState) {
                 Some(LPARAM(&item as *const _ as isize)),
             );
         }
+    }
+
+    // Auto-size columns to fit content
+    unsafe {
+        // LVSCW_AUTOSIZE_USEHEADER = -2
+        let _ = SendMessageW(state.h_listview, LVM_SETCOLUMNWIDTH, Some(WPARAM(0)), Some(LPARAM(-2)));
+        let _ = SendMessageW(state.h_listview, LVM_SETCOLUMNWIDTH, Some(WPARAM(1)), Some(LPARAM(-2)));
+        let _ = SendMessageW(state.h_listview, LVM_SETCOLUMNWIDTH, Some(WPARAM(2)), Some(LPARAM(-2)));
     }
 }
 
