@@ -152,9 +152,10 @@ fn gesture_ended_event_carries_match_result() {
     let matched = mouse_gesture::input_hook::HookEvent::GestureEnded {
         matched: true,
         gesture_name: Some("maximize".into()),
+        target_hwnd: 0,
     };
     match matched {
-        mouse_gesture::input_hook::HookEvent::GestureEnded { matched, gesture_name } => {
+        mouse_gesture::input_hook::HookEvent::GestureEnded { matched, gesture_name, .. } => {
             assert!(matched);
             assert_eq!(gesture_name, Some("maximize".into()));
         }
@@ -164,9 +165,10 @@ fn gesture_ended_event_carries_match_result() {
     let unmatched = mouse_gesture::input_hook::HookEvent::GestureEnded {
         matched: false,
         gesture_name: None,
+        target_hwnd: 0,
     };
     match unmatched {
-        mouse_gesture::input_hook::HookEvent::GestureEnded { matched, gesture_name } => {
+        mouse_gesture::input_hook::HookEvent::GestureEnded { matched, gesture_name, .. } => {
             assert!(!matched);
             assert_eq!(gesture_name, None);
         }
@@ -175,6 +177,37 @@ fn gesture_ended_event_carries_match_result() {
 }
 
 // ── Phase 3: Action Dispatch Tests ────────────────────────────
+
+#[test]
+fn gesture_ended_carries_target_hwnd() {
+    // Verify the new target_hwnd field flows through correctly
+    let event = mouse_gesture::input_hook::HookEvent::GestureEnded {
+        matched: true,
+        gesture_name: Some("close".into()),
+        target_hwnd: 0x12345678,
+    };
+    match event {
+        mouse_gesture::input_hook::HookEvent::GestureEnded { target_hwnd, .. } => {
+            assert_eq!(target_hwnd, 0x12345678);
+        }
+        _ => panic!("expected GestureEnded"),
+    }
+}
+
+#[test]
+fn gesture_ended_zero_target_hwnd_default() {
+    let event = mouse_gesture::input_hook::HookEvent::GestureEnded {
+        matched: false,
+        gesture_name: None,
+        target_hwnd: 0,
+    };
+    match event {
+        mouse_gesture::input_hook::HookEvent::GestureEnded { target_hwnd, .. } => {
+            assert_eq!(target_hwnd, 0);
+        }
+        _ => panic!("expected GestureEnded"),
+    }
+}
 
 #[test]
 fn config_compiles_window_commands() {

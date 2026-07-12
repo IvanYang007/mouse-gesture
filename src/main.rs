@@ -22,8 +22,8 @@ const WINDOW_CLASS: &str = "MouseGestureDaemon\0";
 
 #[derive(Debug, Clone)]
 enum ActionJob {
-    Window { name: String, cmd: mouse_gesture::config::WindowCommand },
-    Keyboard { name: String, inputs: Vec<mouse_gesture::config::CompiledInput> },
+    Window { name: String, cmd: mouse_gesture::config::WindowCommand, target_hwnd: isize },
+    Keyboard { name: String, inputs: Vec<mouse_gesture::config::CompiledInput>, target_hwnd: isize },
     Launch { name: String, path: String, args: Vec<String> },
 }
 
@@ -116,13 +116,13 @@ fn run() -> Result<()> {
     std::thread::Builder::new().name("worker".into()).spawn(move || {
         for job in worker_rx {
             match job {
-                ActionJob::Window { name, cmd } => {
+                ActionJob::Window { name, cmd, target_hwnd } => {
                     info!("Action: {} (window)", name);
-                    execute_window_action(&cmd);
+                    execute_window_action(&cmd, HWND(target_hwnd as *mut _));
                 }
-                ActionJob::Keyboard { name, inputs } => {
+                ActionJob::Keyboard { name, inputs, target_hwnd } => {
                     info!("Action: {} (keyboard)", name);
-                    execute_keyboard_action(&inputs);
+                    execute_keyboard_action(&inputs, HWND(target_hwnd as *mut _));
                 }
                 ActionJob::Launch { name, path, args } => {
                     info!("Action: {} (launch)", name);
@@ -286,19 +286,20 @@ fn dispatch_hook_event(
     config: &Option<ConfigSnapshot>,
 ) {
     match event {
-        HookEvent::GestureEnded { matched: true, gesture_name } => {
+        HookEvent::GestureEnded { matched: true, gesture_name, target_hwnd } => {
             let name = gesture_name.as_deref().unwrap_or("?");
-            debug!("Gesture: {}", name);
+            let hwnd = *target_hwnd;
+            debug!("Gesture: {} (target=0x{:x})", name, hwnd);
             // Enqueue action to worker thread
             if let (Some(ref cfg), Some(ref tx)) = (config, worker_tx) {
                 for (gesture_name, cmd) in &cfg.window_commands {
                     if gesture_name == name {
-                        tx.send(ActionJob::Window { name: name.to_string(), cmd: cmd.clone() }).ok();
+                        tx.send(ActionJob::Window { name: name.to_string(), cmd: cmd.clone(), target_hwnd: hwnd }).ok();
                         return;
                     }
                 }
                 if let Some(inputs) = cfg.key_map.get(name) {
-                    tx.send(ActionJob::Keyboard { name: name.to_string(), inputs: inputs.clone() }).ok();
+                    tx.send(ActionJob::Keyboard { name: name.to_string(), inputs: inputs.clone(), target_hwnd: hwnd }).ok();
                     return;
                 }
                 for (launch_name, path, args) in &cfg.launch_actions {
@@ -323,14 +324,14 @@ fn execute_gesture_action(config: &ConfigSnapshot, gesture_name: &str) {
     for (name, cmd) in &config.window_commands {
         if name == gesture_name {
             info!("Window action: {:?}", cmd);
-            execute_window_action(cmd);
+            execute_window_action(cmd, HWND::default());
             return;
         }
     }
     // Try keyboard shortcuts
     if let Some(inputs) = config.key_map.get(gesture_name) {
         info!("Keyboard action: {} inputs", inputs.len());
-        execute_keyboard_action(inputs);
+        execute_keyboard_action(inputs, HWND::default());
         return;
     }
     // Try launch actions
@@ -346,14 +347,20 @@ fn execute_gesture_action(config: &ConfigSnapshot, gesture_name: &str) {
 
 use mouse_gesture::config::WindowCommand;
 
-fn execute_window_action(cmd: &WindowCommand) {
+fn execute_window_action(cmd: &WindowCommand, target_hwnd: HWND) {
     use mouse_gesture::window_ops::{enumerate_monitors, snap_rect, SnapPosition};
     use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, SetWindowPos, ShowWindowAsync,
-        PostMessageW, SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE, HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE};
+        PostMessageW, SW_MINIMIZE, SW_MAXIMIZE, SW_RESTORE, HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, IsWindow};
     use windows::Win32::UI::WindowsAndMessaging::WM_CLOSE;
-    use windows::Win32::Foundation::{WPARAM, LPARAM};
+    use windows::Win32::Foundation::{WPARAM, LPARAM, HWND as HWND2};
 
-    let hwnd = unsafe { GetForegroundWindow() };
+    // Validate target_hwnd — fall back to foreground if invalid
+    let hwnd = if target_hwnd.is_invalid() || !unsafe { IsWindow(Some(target_hwnd)).as_bool() } {
+        debug!("target_hwnd invalid, falling back to foreground");
+        unsafe { GetForegroundWindow() }
+    } else {
+        target_hwnd
+    };
     let monitors = enumerate_monitors().unwrap_or_default();
     let current_monitor = monitors.first();
 
@@ -430,7 +437,14 @@ fn execute_window_action(cmd: &WindowCommand) {
     }
 }
 
-fn execute_keyboard_action(inputs: &[mouse_gesture::config::CompiledInput]) {
+fn execute_keyboard_action(inputs: &[mouse_gesture::config::CompiledInput], target_hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+
+    // Try to focus the target window so keystrokes land in the right place
+    if !target_hwnd.is_invalid() && unsafe { IsWindow(Some(target_hwnd)).as_bool() } {
+        mouse_gesture::launch::focus_existing(target_hwnd);
+    }
+
     use mouse_gesture::input_inject::{check_modifier_conflict, inject_key_shortcut};
     if let Err(e) = check_modifier_conflict(inputs) {
         warn!("Modifier conflict: {}. Skipping keyboard action.", e);

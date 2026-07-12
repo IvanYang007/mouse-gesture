@@ -30,7 +30,7 @@ pub const WM_HOOK_SHUTDOWN: u32 = WM_USER + 2;
 pub enum HookEvent {
     GestureStarted { x: i32, y: i32, monitor: isize },
     TrailPoint { x: i32, y: i32 },
-    GestureEnded { matched: bool, gesture_name: Option<String> },
+    GestureEnded { matched: bool, gesture_name: Option<String>, target_hwnd: isize },
     DirectionChanged { direction: Direction, x: i32, y: i32 },
     PatternCaptured { directions: Vec<Direction> },
     Error(String),
@@ -65,6 +65,7 @@ struct GestureCompletion {
     point_count: usize,
     release_point: Point,
     config_generation: u64,
+    target_hwnd: isize,
     /// Pre-compiled gesture patterns for classification (owned by this packet).
     patterns: Arc<Vec<PatternDef>>,
     rdp_epsilon_sq: f64,
@@ -223,11 +224,13 @@ pub fn spawn_hook_thread(
                     GestureResult::Matched { name, .. } => {
                         let _ = event_tx_recog.send(HookEvent::GestureEnded {
                             matched: true, gesture_name: Some(name),
+                            target_hwnd: completion.target_hwnd,
                         });
                     }
                     _ => {
                         let _ = event_tx_recog.send(HookEvent::GestureEnded {
                             matched: false, gesture_name: None,
+                            target_hwnd: completion.target_hwnd,
                         });
                     }
                 }
@@ -559,6 +562,13 @@ fn handle_right_up(
             // 0 sentinel = config changed mid-gesture
             let completion_gen = if captured_gen != 0 && captured_gen != config_gen { 0 } else { captured_gen };
 
+            // Capture target window for action dispatch (P0 focus routing fix)
+            let target_hwnd = HOOK_STATE_MACHINE.with(|sm| {
+                sm.borrow().as_ref()
+                    .and_then(|s| s.context.as_ref().map(|c| c.target_hwnd.0 as isize))
+                    .unwrap_or(0)
+            });
+
             // Bake classification params from config into the completion packet
             // so the recognition worker never touches thread-local state
             let (patterns, rdp_epsilon_sq, min_gesture_length) = HOOK_CONFIG.with(|c| {
@@ -580,6 +590,7 @@ fn handle_right_up(
                         points, point_count: count,
                         release_point: Point { x, y },
                         config_generation: completion_gen,
+                        target_hwnd,
                         patterns,
                         rdp_epsilon_sq,
                         min_gesture_length,
