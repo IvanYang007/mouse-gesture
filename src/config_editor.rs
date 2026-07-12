@@ -271,7 +271,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     let h_edit_launch_args = create_edit(hwnd, ID_EDIT_LAUNCH_ARGS, 545, 178, 245, 22)?;
 
     // Placeholder label (shown when no gesture selected)
-    let h_placeholder = create_label(hwnd, "Select a gesture or click Add", 545, 10, 260, 80)?;
+    let h_placeholder = create_label(hwnd, "Select a gesture or click Add", 545, 10, 280, 80)?;
 
     // Form buttons
     let h_btn_add = create_button(hwnd, ID_BTN_ADD, "&Add", 545, 340, 75, 25)?;
@@ -1028,8 +1028,11 @@ fn update_form_visibility(state: &EditorState) {
 
     unsafe {
         let _ = ShowWindow(state.h_placeholder, hide);
+        let _ = ShowWindow(state.h_label_gesture_name, show);
         let _ = ShowWindow(state.h_edit_name, show);
+        let _ = ShowWindow(state.h_label_pattern, show);
         let _ = ShowWindow(state.h_edit_pattern, show);
+        let _ = ShowWindow(state.h_label_action_type, show);
         let _ = ShowWindow(state.h_combo_action_type, show);
 
         if has_selection {
