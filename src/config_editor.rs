@@ -18,9 +18,12 @@ use windows::Win32::Graphics::Gdi::{
     OUT_DEFAULT_PRECIS,
 };
 use windows::Win32::UI::Controls::{
-    InitCommonControlsEx, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, LVS_REPORT,
+    InitCommonControlsEx, ICC_LISTVIEW_CLASSES, INITCOMMONCONTROLSEX, LVCF_TEXT, LVCOLUMNW,
+    LVIF_TEXT, LVITEMW, LVM_DELETEALLITEMS, LVM_INSERTCOLUMNW, LVM_INSERTITEMW,
+    LVM_SETEXTENDEDLISTVIEWSTYLE, LVM_SETITEMW, LVS_EX_FULLROWSELECT, LVS_REPORT,
     LVS_SHOWSELALWAYS, LVS_SINGLESEL, WC_LISTVIEW,
 };
+use windows::core::PWSTR;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, GetWindowLongPtrW,
     GetWindowTextLengthW, GetWindowTextW, IsWindow, MessageBoxW, RegisterClassExW,
@@ -197,6 +200,47 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     }
     .map_err(|e| anyhow::anyhow!("CreateWindowExW (ListView) failed: {:?}", e))?;
 
+    // ── ListView columns ────────────────────────────────
+    {
+        let col_defs = [
+            ("Name\0", 200i32),
+            ("Pattern\0", 120),
+            ("Action\0", 150),
+        ];
+        for (i, (name, width)) in col_defs.iter().enumerate() {
+            let wide: Vec<u16> = name.encode_utf16().collect();
+            let mut col = LVCOLUMNW::default();
+            col.mask = LVCF_TEXT;
+            col.pszText = PWSTR(wide.as_ptr() as *mut _);
+            col.cx = *width;
+            unsafe {
+                SendMessageW(
+                    h_listview,
+                    LVM_INSERTCOLUMNW,
+                    Some(WPARAM(i)),
+                    Some(LPARAM(&col as *const _ as isize)),
+                );
+            }
+        }
+    }
+
+    // Enable full-row select
+    unsafe {
+        SendMessageW(
+            h_listview,
+            LVM_SETEXTENDEDLISTVIEWSTYLE,
+            Some(WPARAM(LVS_EX_FULLROWSELECT as usize)),
+            Some(LPARAM(LVS_EX_FULLROWSELECT as isize)),
+        );
+    }
+
+    // Extract gesture names from parsed config
+    let gesture_names: Vec<String> = config
+        .get("gestures")
+        .and_then(|g| g.as_table())
+        .map(|t| t.iter().map(|(k, _)| k.to_string()).collect())
+        .unwrap_or_default();
+
     // ── Right-side gesture form ─────────────────────────────
 
     create_label(hwnd, "Gesture Name:", 545, 10, 100, 16)?;
@@ -326,7 +370,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
         owner,
         path,
         config,
-        gesture_names: Vec::new(),
+        gesture_names,
         selected_index: None,
         dirty: false,
         h_listview,
@@ -357,6 +401,11 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
 
     // Store the editor HWND globally for single-editor enforcement
     EDITOR_HWND.store(hwnd.0 as isize, Ordering::Release);
+
+    // Populate the ListView with gestures
+    unsafe {
+        populate_listview(&*state_ptr);
+    }
 
     // Show the window
     unsafe {
@@ -648,6 +697,120 @@ fn read_edit_text(edit: HWND) -> Result<String> {
     let mut buf: Vec<u16> = vec![0u16; len + 1];
     let actual = unsafe { GetWindowTextW(edit, &mut buf) as usize };
     Ok(String::from_utf16_lossy(&buf[..actual.min(len)]))
+}
+
+/// Populate the ListView from `gesture_names` and the parsed `DocumentMut`.
+fn populate_listview(state: &EditorState) {
+    // Clear all existing items
+    unsafe {
+        let _ = SendMessageW(
+            state.h_listview,
+            LVM_DELETEALLITEMS,
+            Some(WPARAM(0)),
+            Some(LPARAM(0)),
+        );
+    }
+
+    // Get gestures table
+    let gestures = match state.config.get("gestures").and_then(|g| g.as_table()) {
+        Some(t) => t,
+        None => return,
+    };
+
+    for (index, name) in state.gesture_names.iter().enumerate() {
+        let gesture = match gestures.get(name.as_str()).and_then(|g| g.as_table()) {
+            Some(g) => g,
+            None => continue,
+        };
+
+        // Pattern
+        let pattern = gesture
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        // Action type label
+        let action_label = gesture
+            .get("action")
+            .and_then(|v| v.as_inline_table())
+            .map(|action| {
+                let action_type = action.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                match action_type {
+                    "window" => {
+                        let cmd =
+                            action.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                        format!("Window: {}", cmd)
+                    }
+                    "key" => {
+                        let combo_str = action
+                            .get("combo")
+                            .and_then(|v| v.as_array())
+                            .map(|arr| {
+                                arr.iter()
+                                    .filter_map(|v| v.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("+")
+                            })
+                            .unwrap_or_default();
+                        format!("Key: {}", combo_str)
+                    }
+                    "launch" => {
+                        let path =
+                            action.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                        format!("Launch: {}", path)
+                    }
+                    other => format!("Unknown: {}", other),
+                }
+            })
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        // Column 0: Name
+        let mut name_wide: Vec<u16> =
+            name.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut item = LVITEMW::default();
+        item.mask = LVIF_TEXT;
+        item.iItem = index as i32;
+        item.iSubItem = 0;
+        item.pszText = PWSTR(name_wide.as_mut_ptr());
+        unsafe {
+            SendMessageW(
+                state.h_listview,
+                LVM_INSERTITEMW,
+                Some(WPARAM(0)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
+        }
+
+        // Column 1: Pattern
+        let mut pat_wide: Vec<u16> =
+            pattern.encode_utf16().chain(std::iter::once(0)).collect();
+        item.iSubItem = 1;
+        item.pszText = PWSTR(pat_wide.as_mut_ptr());
+        unsafe {
+            SendMessageW(
+                state.h_listview,
+                LVM_SETITEMW,
+                Some(WPARAM(0)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
+        }
+
+        // Column 2: Action
+        let mut action_wide: Vec<u16> = action_label
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        item.iSubItem = 2;
+        item.pszText = PWSTR(action_wide.as_mut_ptr());
+        unsafe {
+            SendMessageW(
+                state.h_listview,
+                LVM_SETITEMW,
+                Some(WPARAM(0)),
+                Some(LPARAM(&item as *const _ as isize)),
+            );
+        }
+    }
 }
 
 /// Show an error dialog.
