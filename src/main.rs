@@ -4,7 +4,7 @@ use anyhow::Result;
 use log::{error, info, warn, debug};
 use mouse_gesture::config::{ConfigFile, ConfigSnapshot};
 use mouse_gesture::input_hook::{self, HookCommand, HookController, HookEvent};
-use mouse_gesture::tray::{TrayIcon, TrayState};
+use mouse_gesture::tray::{TrayCommand, TrayIcon, TrayState};
 use mouse_gesture::lifecycle;
 use mouse_gesture::overlay::OverlayWindow;
 use std::sync::{Arc, Mutex};
@@ -15,7 +15,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowLongPtrW, GetWindowLongPtrW, GWLP_USERDATA,
     CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MSG,
     WINDOW_EX_STYLE, WS_OVERLAPPED,
-    WM_CLOSE, WM_DESTROY, WM_QUERYENDSESSION,
+    WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_QUERYENDSESSION,
+    WM_RBUTTONUP,
 };
 
 const WINDOW_CLASS: &str = "MouseGestureDaemon\0";
@@ -514,23 +515,41 @@ unsafe extern "system" fn window_proc(
             LRESULT(0)
         }
         _ => {
-            // Handle tray callback
+            // Handle tray callback — lock briefly only to check if this message
+            // belongs to the tray icon, then release before any modal operation.
             let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState>;
             if !state_ptr.is_null() {
-                if let Ok(guard) = unsafe { &*state_ptr }.lock() {
-                    if let Some(ref tray) = guard.tray {
-                        if msg == tray.callback_msg() {
-                            match lparam.0 as u32 {
-                                0x0205 => { // WM_RBUTTONUP on tray
-                                    info!("Tray right-click — opening config");
-                                    let path = config_path();
-                                    let _ = mouse_gesture::launch::shell_open(&path.to_string_lossy());
-                                }
-                                _ => {}
+                let (is_tray_msg, tray_event) = {
+                    if let Ok(guard) = unsafe { &*state_ptr }.lock() {
+                        if let Some(ref tray) = guard.tray {
+                            if msg == tray.callback_msg() {
+                                (true, (lparam.0 as u32) & 0xffff)
+                            } else {
+                                (false, 0)
                             }
-                            return LRESULT(0);
+                        } else {
+                            (false, 0)
+                        }
+                    } else {
+                        (false, 0)
+                    }
+                };
+
+                if is_tray_msg {
+                    if tray_event == WM_RBUTTONUP as u32 || tray_event == WM_CONTEXTMENU as u32 {
+                        // Mutex released — safe to call show_context_menu (modal loop).
+                        match mouse_gesture::tray::show_context_menu(hwnd) {
+                            Ok(Some(cmd)) => match cmd {
+                                TrayCommand::Configure => info!("Tray: Configure"),
+                                TrayCommand::ReloadConfig => info!("Tray: Reload"),
+                                TrayCommand::OpenConfigFolder => info!("Tray: Open folder"),
+                                TrayCommand::Exit => info!("Tray: Exit"),
+                            },
+                            Ok(None) => debug!("Tray: menu dismissed"),
+                            Err(e) => error!("Tray: menu error: {}", e),
                         }
                     }
+                    return LRESULT(0);
                 }
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)

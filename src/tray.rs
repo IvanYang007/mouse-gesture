@@ -1,7 +1,7 @@
 //! System tray icon — Shell_NotifyIconW wrapper, popup menu,
 //! and TaskbarCreated re-registration.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use log;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Shell::{
@@ -9,9 +9,14 @@ use windows::Win32::UI::Shell::{
     NIM_ADD, NIM_DELETE, NIM_MODIFY,
     NIF_ICON, NIF_MESSAGE, NIF_TIP,
 };
+use windows::Win32::Foundation::{POINT, WPARAM, LPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
-    LoadImageW, IMAGE_ICON, LR_LOADFROMFILE, LR_DEFAULTSIZE,
-    HICON, WM_APP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos,
+    LoadImageW, PostMessageW, SetForegroundWindow, TrackPopupMenuEx,
+    HMENU, IMAGE_ICON, LR_LOADFROMFILE, LR_DEFAULTSIZE,
+    HICON, MF_SEPARATOR, MF_STRING,
+    TPM_RIGHTBUTTON, TPM_RETURNCMD, TPM_NONOTIFY,
+    WM_APP, WM_NULL,
 };
 
 /// Tray icon states for visual status display.
@@ -27,6 +32,78 @@ pub struct TrayIcon {
     hwnd: HWND,
     uid: u32,
     callback_msg: u32,
+}
+
+/// Context menu command identifiers
+pub const IDM_CONFIGURE: u32 = 1001;
+pub const IDM_RELOAD_CONFIG: u32 = 1002;
+pub const IDM_OPEN_CONFIG_FOLDER: u32 = 1003;
+pub const IDM_EXIT: u32 = 1004;
+
+/// Commands selectable from the tray right-click context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayCommand {
+    Configure,
+    ReloadConfig,
+    OpenConfigFolder,
+    Exit,
+}
+
+/// Show the tray context menu at the cursor position.
+///
+/// Returns the selected command or `None` if the user clicked away.
+///
+/// # Safety
+///
+/// `TrackPopupMenuEx` runs an internal modal message loop that re-enters
+/// `window_proc`. Callers must NOT hold the `DaemonState` mutex across
+/// this call — deadlock will occur if the re-entrant proc tries to lock.
+pub fn show_context_menu(hwnd: HWND) -> Result<Option<TrayCommand>> {
+    unsafe {
+        let menu = CreatePopupMenu()?;
+
+        // Guard so DestroyMenu runs on all exit paths (error, cancel, select).
+        struct MenuGuard(HMENU);
+        impl Drop for MenuGuard {
+            fn drop(&mut self) {
+                unsafe { DestroyMenu(self.0); }
+            }
+        }
+        let menu = MenuGuard(menu);
+
+        AppendMenuW(menu.0, MF_STRING, IDM_CONFIGURE as usize, windows::core::w!("Configure..."));
+        AppendMenuW(menu.0, MF_STRING, IDM_RELOAD_CONFIG as usize, windows::core::w!("Reload configuration"));
+        AppendMenuW(menu.0, MF_SEPARATOR, 0, None);
+        AppendMenuW(menu.0, MF_STRING, IDM_OPEN_CONFIG_FOLDER as usize, windows::core::w!("Open configuration folder"));
+        AppendMenuW(menu.0, MF_SEPARATOR, 0, None);
+        AppendMenuW(menu.0, MF_STRING, IDM_EXIT as usize, windows::core::w!("Exit"));
+
+        let mut pt = POINT::default();
+        GetCursorPos(&mut pt)?;
+
+        // Required: set foreground so the menu can be dismissed by clicking away.
+        SetForegroundWindow(hwnd);
+
+        let cmd = TrackPopupMenuEx(
+            menu.0,
+            (TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY).0,
+            pt.x, pt.y,
+            hwnd,
+            None,
+        );
+
+        // Post benign message so the menu window finishes cleaning up.
+        PostMessageW(Some(hwnd), WM_NULL, WPARAM::default(), LPARAM::default());
+
+        match cmd.0 as u32 {
+            0 => Ok(None),
+            IDM_CONFIGURE => Ok(Some(TrayCommand::Configure)),
+            IDM_RELOAD_CONFIG => Ok(Some(TrayCommand::ReloadConfig)),
+            IDM_OPEN_CONFIG_FOLDER => Ok(Some(TrayCommand::OpenConfigFolder)),
+            IDM_EXIT => Ok(Some(TrayCommand::Exit)),
+            _ => Ok(None),
+        }
+    }
 }
 
 /// Helper to convert BOOL return from Shell_NotifyIconW to Result.
