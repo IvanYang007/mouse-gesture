@@ -33,7 +33,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BM_GETCHECK, BM_SETCHECK, BN_CLICKED, BS_AUTOCHECKBOX, BS_PUSHBUTTON, CBN_SELCHANGE,
     CBS_DROPDOWNLIST, CB_ADDSTRING, CB_GETCURSEL, CB_SETCURSEL, EN_CHANGE, ES_AUTOHSCROLL, ES_LEFT,
     ES_MULTILINE, ES_WANTRETURN, GWLP_USERDATA, HMENU, IDCANCEL, IDNO, IDYES, MB_ICONERROR,
-    MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL, MINMAXINFO, SM_CXSCREEN, SM_CYSCREEN, SWP_NOZORDER,
+    MB_ICONQUESTION, MB_OK, MB_YESNOCANCEL, MINMAXINFO, SM_CXSCREEN, SM_CYSCREEN, SWP_NOCOPYBITS,
+    SWP_NOZORDER,
     SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE, WM_APP, WM_CLOSE, WM_COMMAND,
     WM_GETMINMAXINFO, WM_NCDESTROY, WM_NOTIFY, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD,
     WS_EX_CLIENTEDGE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WS_VSCROLL,
@@ -715,7 +716,7 @@ unsafe extern "system" fn editor_proc(
             // ListView: left 2/3, fills from top to settings
             let lv_w = client_w * 2 / 3 - 15;
             unsafe {
-                let _ = SetWindowPos(state.h_listview, None, 5, 5, lv_w, top_h - 10, SWP_NOZORDER);
+                let _ = SetWindowPos(state.h_listview, None, 5, 5, lv_w, top_h - 10, SWP_NOZORDER | SWP_NOCOPYBITS);
             }
 
             // ── Form panel: right 1/3 ──────────────────────
@@ -732,7 +733,7 @@ unsafe extern "system" fn editor_proc(
                     10,
                     form_w,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_edit_name,
@@ -741,7 +742,7 @@ unsafe extern "system" fn editor_proc(
                     28,
                     ctrl_w,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_label_pattern,
@@ -750,7 +751,7 @@ unsafe extern "system" fn editor_proc(
                     55,
                     form_w,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_edit_pattern,
@@ -759,7 +760,7 @@ unsafe extern "system" fn editor_proc(
                     73,
                     ctrl_w,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_label_action_type,
@@ -768,7 +769,7 @@ unsafe extern "system" fn editor_proc(
                     100,
                     form_w,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_combo_action_type,
@@ -777,7 +778,7 @@ unsafe extern "system" fn editor_proc(
                     118,
                     ctrl_w,
                     200,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
 
                 // Action-specific controls
@@ -788,7 +789,7 @@ unsafe extern "system" fn editor_proc(
                     148,
                     ctrl_w,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_combo_window_cmd,
@@ -797,7 +798,7 @@ unsafe extern "system" fn editor_proc(
                     148,
                     ctrl_w,
                     200,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_edit_launch_path,
@@ -806,7 +807,7 @@ unsafe extern "system" fn editor_proc(
                     148,
                     ctrl_w,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_edit_launch_args,
@@ -815,7 +816,7 @@ unsafe extern "system" fn editor_proc(
                     178,
                     ctrl_w,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
 
                 // Placeholder
@@ -826,11 +827,11 @@ unsafe extern "system" fn editor_proc(
                     10,
                     form_w,
                     80,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
 
                 // Form buttons
-                let _ = SetWindowPos(state.h_btn_add, None, form_x, 340, 75, 25, SWP_NOZORDER);
+                let _ = SetWindowPos(state.h_btn_add, None, form_x, 340, 75, 25, SWP_NOZORDER | SWP_NOCOPYBITS);
                 let _ = SetWindowPos(
                     state.h_btn_clear,
                     None,
@@ -838,7 +839,7 @@ unsafe extern "system" fn editor_proc(
                     340,
                     75,
                     25,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_btn_delete,
@@ -847,7 +848,7 @@ unsafe extern "system" fn editor_proc(
                     340,
                     75,
                     25,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
             }
 
@@ -862,7 +863,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 5,
                     client_w - 10,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_label_settings,
@@ -871,7 +872,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 25,
                     60,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
 
                 // Row 1: Threshold, Sample, Epsilon
@@ -882,7 +883,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 45,
                     60,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_edit_threshold,
@@ -891,7 +892,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 43,
                     60,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_label_sample,
@@ -900,7 +901,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 45,
                     50,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_edit_sample,
@@ -909,7 +910,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 43,
                     60,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_label_epsilon,
@@ -918,7 +919,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 45,
                     50,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_edit_epsilon,
@@ -927,7 +928,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 43,
                     60,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
 
                 // Row 2: Min Len, Debug, Startup
@@ -938,7 +939,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 72,
                     55,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_edit_min_len,
@@ -947,7 +948,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 70,
                     50,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_check_debug,
@@ -956,7 +957,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 70,
                     120,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_check_startup,
@@ -965,7 +966,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 70,
                     140,
                     22,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
 
                 // ── Blacklist section ───────────────────────
@@ -976,7 +977,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 100,
                     60,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_label_blacklist_mode,
@@ -985,7 +986,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 118,
                     40,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_blacklist_mode,
@@ -994,7 +995,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 116,
                     120,
                     200,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_label_blacklist_apps,
@@ -1003,7 +1004,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 118,
                     40,
                     16,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_blacklist_apps,
@@ -1012,7 +1013,7 @@ unsafe extern "system" fn editor_proc(
                     settings_y + 116,
                     client_w - 230,
                     50,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
 
                 // ── Save / Cancel buttons ───────────────────
@@ -1024,7 +1025,7 @@ unsafe extern "system" fn editor_proc(
                     btn_y,
                     80,
                     25,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
                 let _ = SetWindowPos(
                     state.h_btn_save,
@@ -1033,7 +1034,7 @@ unsafe extern "system" fn editor_proc(
                     btn_y,
                     80,
                     25,
-                    SWP_NOZORDER,
+                    SWP_NOZORDER | SWP_NOCOPYBITS,
                 );
             }
 
