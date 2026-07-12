@@ -84,7 +84,6 @@ struct EditorState {
     selected_index: Option<usize>,
     is_adding: bool,
     dirty: bool,
-    h_placeholder: HWND,
     h_listview: HWND,
     // Settings panel
     h_edit_threshold: HWND,
@@ -270,9 +269,6 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
     let h_edit_launch_path = create_edit(hwnd, ID_EDIT_LAUNCH_PATH, 545, 148, 245, 22)?;
     let h_edit_launch_args = create_edit(hwnd, ID_EDIT_LAUNCH_ARGS, 545, 178, 245, 22)?;
 
-    // Placeholder label (shown when no gesture selected)
-    let h_placeholder = create_label(hwnd, "Select a gesture or click Add", 545, 10, 280, 80)?;
-
     // Form buttons
     let h_btn_add = create_button(hwnd, ID_BTN_ADD, "&Add", 545, 340, 75, 25)?;
     let h_btn_clear = create_button(hwnd, ID_BTN_CLEAR, "&Clear", 628, 340, 75, 25)?;
@@ -403,7 +399,7 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
         selected_index: None,
         is_adding: false,
         dirty: false,
-        h_placeholder,
+
         h_listview,
         h_edit_threshold,
         h_edit_sample,
@@ -1027,7 +1023,6 @@ fn update_form_visibility(state: &EditorState) {
     let hide = if has_selection { SW_HIDE } else { SW_SHOW };
 
     unsafe {
-        let _ = ShowWindow(state.h_placeholder, hide);
         let _ = ShowWindow(state.h_label_gesture_name, show);
         let _ = ShowWindow(state.h_edit_name, show);
         let _ = ShowWindow(state.h_label_pattern, show);
