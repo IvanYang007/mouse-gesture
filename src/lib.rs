@@ -13,5 +13,4 @@ pub mod lifecycle;
 pub mod overlay;
 pub mod state_machine;
 pub mod tray;
-pub mod win_handles;
 pub mod window_ops;

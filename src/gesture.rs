@@ -96,20 +96,8 @@ impl GestureBuffer {
             }
         }
 
-        if self.len >= MAX_POINTS {
-            // Adaptive decimation: keep every 2nd point, halve the stored count
-            if self.len >= MAX_POINTS {
-                let mut dst = 0;
-                for src in (0..self.len).step_by(2) {
-                    self.points[dst] = self.points[src];
-                    dst += 1;
-                }
-                self.len = dst;
-                // If still full after decimation, reject
-                if self.len >= MAX_POINTS {
-                    return false;
-                }
-            }
+        if self.len >= MAX_POINTS && !self.decimate() {
+            return false;
         }
 
         self.points[self.len] = p;
@@ -122,6 +110,18 @@ impl GestureBuffer {
     pub fn clear(&mut self) {
         self.len = 0;
         self.last_sample = None;
+    }
+
+    /// Adaptive decimation: keep every 2nd point when the buffer is full.
+    /// Returns true if there is room after decimation, false if still full.
+    fn decimate(&mut self) -> bool {
+        let mut dst = 0;
+        for src in (0..self.len).step_by(2) {
+            self.points[dst] = self.points[src];
+            dst += 1;
+        }
+        self.len = dst;
+        self.len < MAX_POINTS
     }
 
     /// Add a point unconditionally, skipping spatial coalescing.
@@ -137,17 +137,8 @@ impl GestureBuffer {
             }
         }
 
-        if self.len >= MAX_POINTS {
-            // Adaptive decimation: keep every 2nd point
-            let mut dst = 0;
-            for src in (0..self.len).step_by(2) {
-                self.points[dst] = self.points[src];
-                dst += 1;
-            }
-            self.len = dst;
-            if self.len >= MAX_POINTS {
-                return false;
-            }
+        if self.len >= MAX_POINTS && !self.decimate() {
+            return false;
         }
 
         self.points[self.len] = p;

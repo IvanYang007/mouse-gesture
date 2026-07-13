@@ -1,6 +1,5 @@
 //! Window operations — monitor enumeration, DPI-aware coordinate
-//! conversions, window tiling (half/quarter snap), and window state
-//! commands (maximize, minimize, restore, close).
+//! conversions, and window tiling (half/quarter snap).
 
 use anyhow::Result;
 use windows::Win32::Foundation::{HWND, RECT};
@@ -9,9 +8,6 @@ use windows::Win32::Graphics::Gdi::{
     MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::WindowsAndMessaging::{
-    PostMessageW, ShowWindowAsync, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
-};
 
 /// A monitor descriptor used for tiling calculations.
 #[derive(Debug, Clone)]
@@ -172,32 +168,4 @@ pub fn snap_rect(monitor: &MonitorInfo, position: SnapPosition) -> RECT {
             }
         }
     }
-}
-
-/// Execute a window management command.
-pub fn execute_window_command(hwnd: HWND, command: &str) -> Result<()> {
-    match command {
-        "maximize" => unsafe {
-            ShowWindowAsync(hwnd, SW_MAXIMIZE);
-        },
-        "minimize" => unsafe {
-            ShowWindowAsync(hwnd, SW_MINIMIZE);
-        },
-        "restore" => unsafe {
-            ShowWindowAsync(hwnd, SW_RESTORE);
-        },
-        "close" => unsafe {
-            PostMessageW(
-                Some(hwnd),
-                WM_CLOSE,
-                windows::Win32::Foundation::WPARAM::default(),
-                windows::Win32::Foundation::LPARAM::default(),
-            );
-        },
-        "toggle-always-on-top" => {
-            // TODO: track current topmost state
-        }
-        _ => anyhow::bail!("unknown window command: {}", command),
-    }
-    Ok(())
 }

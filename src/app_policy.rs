@@ -101,12 +101,6 @@ pub fn get_snapshot() -> Option<&'static PolicySnapshot> {
     }
 }
 
-/// Pre-warm the policy cache by enumerating visible top-level windows.
-/// Returns a PolicySnapshot populated with known PIDs.
-pub fn prewarm_cache(snapshot: &ConfigSnapshot) -> PolicySnapshot {
-    PolicySnapshot::from_snapshot(snapshot)
-}
-
 /// Resolve a PID to its basename and eligibility.
 /// Called by the policy worker thread for unknown PIDs encountered by the hook.
 pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {

@@ -125,7 +125,6 @@ fn policy_cache_whitelist_mode_unknown_pid_ineligible() {
 
 #[test]
 fn policy_cache_blacklist_excluded_pid_ineligible() {
-    use mouse_gesture::app_policy::PolicyEntry;
     use mouse_gesture::config::BlacklistMode;
     use std::collections::HashMap;
     let mut cache = mouse_gesture::app_policy::PolicyCache {

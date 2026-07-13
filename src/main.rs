@@ -406,42 +406,12 @@ fn dispatch_hook_event(
     }
 }
 
-/// Look up a gesture by name in the config and execute its action.
-fn execute_gesture_action(config: &ConfigSnapshot, gesture_name: &str) {
-    // Try window commands
-    for (name, cmd) in &config.window_commands {
-        if name == gesture_name {
-            info!("Window action: {:?}", cmd);
-            execute_window_action(cmd, HWND::default());
-            return;
-        }
-    }
-    // Try keyboard shortcuts
-    if let Some(inputs) = config.key_map.get(gesture_name) {
-        info!("Keyboard action: {} inputs", inputs.len());
-        execute_keyboard_action(inputs, HWND::default());
-        return;
-    }
-    // Try launch actions
-    for (name, path, args) in &config.launch_actions {
-        if name == gesture_name {
-            info!("Launch action: {} {:?}", path, args);
-            execute_launch_action(path, args);
-            return;
-        }
-    }
-    warn!("Gesture '{}' has no compiled action", gesture_name);
-}
-
-use mouse_gesture::config::WindowCommand;
-
-fn execute_window_action(cmd: &WindowCommand, target_hwnd: HWND) {
-    use mouse_gesture::window_ops::{enumerate_monitors, snap_rect, SnapPosition};
-    use windows::Win32::Foundation::{LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::WM_CLOSE;
+fn execute_window_action(cmd: &mouse_gesture::config::WindowCommand, target_hwnd: HWND) {
+    use mouse_gesture::config::WindowCommand;
+    use mouse_gesture::window_ops::{enumerate_monitors, SnapPosition};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, IsWindow, PostMessageW, SetWindowPos, ShowWindowAsync, HWND_TOP,
-        SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE,
+        GetForegroundWindow, IsWindow, PostMessageW, ShowWindowAsync,
+        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
     };
 
     // Validate target_hwnd — fall back to foreground if invalid
@@ -451,8 +421,11 @@ fn execute_window_action(cmd: &WindowCommand, target_hwnd: HWND) {
     } else {
         target_hwnd
     };
-    let monitors = enumerate_monitors().unwrap_or_default();
-    let current_monitor = monitors.first();
+
+    // Defer monitor enumeration — only needed for snap/center/move operations
+    // Basic window commands (maximize, minimize, restore, close) skip this entirely.
+    let monitors: std::cell::LazyCell<Vec<mouse_gesture::window_ops::MonitorInfo>> =
+        std::cell::LazyCell::new(|| enumerate_monitors().unwrap_or_default());
 
     match cmd {
         WindowCommand::Maximize => unsafe {
@@ -465,170 +438,44 @@ fn execute_window_action(cmd: &WindowCommand, target_hwnd: HWND) {
             ShowWindowAsync(hwnd, SW_RESTORE);
         },
         WindowCommand::Close => unsafe {
-            PostMessageW(Some(hwnd), WM_CLOSE, WPARAM::default(), LPARAM::default());
+            PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         },
-        WindowCommand::SnapLeft => {
-            if let Some(m) = current_monitor {
-                let r = snap_rect(m, SnapPosition::Left);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
-        WindowCommand::SnapRight => {
-            if let Some(m) = current_monitor {
-                let r = snap_rect(m, SnapPosition::Right);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
-        WindowCommand::SnapTop => {
-            if let Some(m) = current_monitor {
-                let r = snap_rect(m, SnapPosition::Top);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
-        WindowCommand::SnapBottom => {
-            if let Some(m) = current_monitor {
-                let r = snap_rect(m, SnapPosition::Bottom);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
-        WindowCommand::SnapTopLeft => {
-            if let Some(m) = current_monitor {
-                let r = snap_rect(m, SnapPosition::TopLeft);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
-        WindowCommand::SnapTopRight => {
-            if let Some(m) = current_monitor {
-                let r = snap_rect(m, SnapPosition::TopRight);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
-        WindowCommand::SnapBottomLeft => {
-            if let Some(m) = current_monitor {
-                let r = snap_rect(m, SnapPosition::BottomLeft);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
-        WindowCommand::SnapBottomRight => {
-            if let Some(m) = current_monitor {
-                let r = snap_rect(m, SnapPosition::BottomRight);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
-        WindowCommand::Center => {
-            if let Some(m) = current_monitor {
-                let r = snap_rect(m, SnapPosition::Center);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
-            }
-        }
+        WindowCommand::SnapLeft => do_snap(hwnd, monitors.first(), SnapPosition::Left),
+        WindowCommand::SnapRight => do_snap(hwnd, monitors.first(), SnapPosition::Right),
+        WindowCommand::SnapTop => do_snap(hwnd, monitors.first(), SnapPosition::Top),
+        WindowCommand::SnapBottom => do_snap(hwnd, monitors.first(), SnapPosition::Bottom),
+        WindowCommand::SnapTopLeft => do_snap(hwnd, monitors.first(), SnapPosition::TopLeft),
+        WindowCommand::SnapTopRight => do_snap(hwnd, monitors.first(), SnapPosition::TopRight),
+        WindowCommand::SnapBottomLeft => do_snap(hwnd, monitors.first(), SnapPosition::BottomLeft),
+        WindowCommand::SnapBottomRight => do_snap(hwnd, monitors.first(), SnapPosition::BottomRight),
+        WindowCommand::Center => do_snap(hwnd, monitors.first(), SnapPosition::Center),
         WindowCommand::ToggleAlwaysOnTop => {
             info!("ToggleAlwaysOnTop not yet implemented");
         }
         WindowCommand::MoveToMonitor(n) => {
             if let Some(m) = monitors.get(*n as usize) {
-                let r = snap_rect(m, SnapPosition::Center);
-                unsafe {
-                    SetWindowPos(
-                        hwnd,
-                        Some(HWND_TOP),
-                        r.left,
-                        r.top,
-                        r.right - r.left,
-                        r.bottom - r.top,
-                        SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
-                    );
-                }
+                do_snap(hwnd, Some(m), SnapPosition::Center);
             }
+        }
+    }
+}
+
+/// Execute a snap/positioning operation on a window.
+fn do_snap(hwnd: HWND, monitor: Option<&mouse_gesture::window_ops::MonitorInfo>, position: mouse_gesture::window_ops::SnapPosition) {
+    use mouse_gesture::window_ops::snap_rect;
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE};
+    if let Some(m) = monitor {
+        let r = snap_rect(m, position);
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOP),
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE,
+            );
         }
     }
 }

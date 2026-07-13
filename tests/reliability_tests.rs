@@ -3,8 +3,8 @@
 //! and resource stability.
 
 use mouse_gesture::config::ConfigFile;
-use mouse_gesture::gesture::{classify, GestureBuffer, GestureResult, Point, MAX_POINTS};
-use mouse_gesture::state_machine::{DownResult, GestureContext, State, StateMachine, UpResult};
+use mouse_gesture::gesture::{classify, GestureBuffer, GestureResult, Point};
+use mouse_gesture::state_machine::{DownResult, State, StateMachine, UpResult};
 
 // ── Gesture Buffer Stress Tests ────────────────────────────────
 
@@ -121,8 +121,6 @@ min_gesture_length = 1
     assert!(snapshot.is_ok(), "extreme values should compile");
 }
 
-#[test]
-#[test]
 #[test]
 fn config_rejects_long_patterns() {
     let tokens = (0..33).map(|_| "E").collect::<Vec<_>>().join(" ");
