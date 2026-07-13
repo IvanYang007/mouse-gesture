@@ -879,24 +879,29 @@ fn reload_config(hwnd: HWND) {
     match ConfigFile::load(&config_path()) {
         Ok(cfg) => match cfg.compile(1, 96) {
             Ok(snapshot) => {
+                let start_with_windows = snapshot.start_with_windows;
+                let gesture_count = snapshot.gestures.len();
                 // Publish updated policy snapshot
                 mouse_gesture::app_policy::publish_snapshot(
                     mouse_gesture::app_policy::PolicySnapshot::from_snapshot(&snapshot),
                 );
-                // Sync autostart
-                mouse_gesture::autostart::sync(snapshot.start_with_windows);
                 // Update hook
                 if let Some(ref ctrl) = guard.hook_ctrl {
                     let _ = ctrl.send(HookCommand::UpdateConfig(snapshot.clone()));
                     let _ = ctrl.send(HookCommand::SetInterception(true));
                 }
                 // Update state
-                let gesture_count = snapshot.gestures.len();
                 guard.config = Some(snapshot);
                 // Update tray
                 if let Some(ref tray) = guard.tray {
                     let _ = tray.update_status(&TrayState::Active { gesture_count });
                 }
+                drop(guard);
+                // Sync autostart on a background thread — `reg.exe` can block
+                // for seconds when the registry is contended; do NOT block the UI.
+                std::thread::spawn(move || {
+                    mouse_gesture::autostart::sync(start_with_windows);
+                });
                 info!("Config reloaded: {} gestures", gesture_count);
             }
             Err(e) => {

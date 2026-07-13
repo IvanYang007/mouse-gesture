@@ -1020,7 +1020,6 @@ fn update_form_visibility(state: &EditorState) {
     let has_selection = state.selected_index.is_some() || state.is_adding;
 
     let show = if has_selection { SW_SHOW } else { SW_HIDE };
-    let hide = if has_selection { SW_HIDE } else { SW_SHOW };
 
     unsafe {
         let _ = ShowWindow(state.h_label_gesture_name, show);
