@@ -591,8 +591,11 @@ fn handle_right_down(
                 Some(Eligibility::Allowed) => true,
                 Some(Eligibility::Denied) => false,
                 None => {
+                    // PID unknown — enqueue background resolution and pass through.
+                    // Consuming the event before the policy is resolved would let a
+                    // blacklisted app (e.g. Chrome) slip through on the first gesture.
                     enqueue_policy_resolution(target_pid);
-                    snapshot.default_for_unknown() == Eligibility::Allowed
+                    false
                 }
             },
             None => true,
