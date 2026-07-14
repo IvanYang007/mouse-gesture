@@ -104,21 +104,75 @@ pub fn get_snapshot() -> Option<&'static PolicySnapshot> {
 /// Resolve a PID to its basename and eligibility.
 /// Called by the policy worker thread for unknown PIDs encountered by the hook.
 pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
-    // In a full implementation:
-    // 1. OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-    // 2. QueryFullProcessImageNameW
-    // 3. Extract basename
-    // 4. Match against blacklist_apps (case-insensitive)
-    // 5. Check integrity level via GetTokenInformation(TokenIntegrityLevel)
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::Foundation::CloseHandle;
 
-    // Skeleton: all PIDs are eligible
-    let is_eligible = match &snapshot.blacklist_mode {
-        BlacklistMode::Blacklist => true,
-        BlacklistMode::Whitelist => false,
+    // 1. Open the process
+    let handle = unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+    };
+    let handle = match handle {
+        Ok(h) => h,
+        Err(_) => {
+            // Process may have exited or we lack permission — treat as unknown,
+            // let the default policy for the mode apply.
+            return None;
+        }
     };
 
+    // 2. Query the full process image name
+    let basename = unsafe {
+        let mut buf = [0u16; 260];
+        let mut len = buf.len() as u32;
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0), // PROCESS_NAME_WIN32
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
+        if result.is_err() {
+            CloseHandle(handle);
+            return None;
+        }
+        CloseHandle(handle);
+
+        let full = String::from_utf16_lossy(&buf[..len as usize]);
+        // 3. Extract basename
+        std::path::Path::new(&full)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(&full)
+            .to_lowercase()
+    };
+
+    // 4. Match against blacklist_apps (case-insensitive)
+    let is_eligible = match &snapshot.blacklist_mode {
+        BlacklistMode::Blacklist => {
+            !snapshot
+                .blacklist_apps
+                .iter()
+                .any(|app| app.to_lowercase() == basename)
+        }
+        BlacklistMode::Whitelist => {
+            snapshot
+                .blacklist_apps
+                .iter()
+                .any(|app| app.to_lowercase() == basename)
+        }
+    };
+
+    log::info!(
+        "Policy resolved: pid={} basename={} eligible={}",
+        pid,
+        basename,
+        is_eligible
+    );
+
     Some(PolicyEntry {
-        basename: format!("pid_{}", pid),
+        basename,
         is_eligible,
     })
 }
