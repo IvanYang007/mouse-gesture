@@ -591,11 +591,18 @@ fn handle_right_down(
                 Some(Eligibility::Allowed) => true,
                 Some(Eligibility::Denied) => false,
                 None => {
-                    // PID unknown — enqueue background resolution and pass through.
-                    // Consuming the event before the policy is resolved would let a
-                    // blacklisted app (e.g. Chrome) slip through on the first gesture.
-                    enqueue_policy_resolution(target_pid);
-                    false
+                    // PID unknown — resolve synchronously in the hook callback.
+                    // Background resolution is too slow: by the time the policy
+                    // worker finishes, the full gesture has already completed.
+                    let eligibility = resolve_pid_sync(target_pid);
+                    let mut snapshot_mut = app_policy::PolicySnapshot {
+                        mode: snapshot.mode.clone(),
+                        generation: snapshot.generation,
+                        known_pids: snapshot.known_pids.clone(),
+                    };
+                    snapshot_mut.known_pids.insert(target_pid, eligibility);
+                    app_policy::publish_snapshot(snapshot_mut);
+                    eligibility == Eligibility::Allowed
                 }
             },
             None => true,
@@ -864,6 +871,69 @@ fn enqueue_replay(replay: ClickReplay) {
 struct PolicyRequest {
     pid: u32,
     config: ConfigSnapshot,
+}
+
+/// Resolve a PID to eligibility synchronously in the hook callback.
+/// Called inline when the PID is not yet in the PolicySnapshot cache.
+/// Uses OpenProcess + QueryFullProcessImageNameW + blacklist check.
+fn resolve_pid_sync(pid: u32) -> Eligibility {
+    use crate::config::BlacklistMode;
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::Foundation::CloseHandle;
+
+    let handle = match unsafe {
+        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+    } {
+        Ok(h) => h,
+        Err(_) => return Eligibility::Allowed,
+    };
+
+    let basename = unsafe {
+        let mut len: u32 = 0;
+        let _ = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(std::ptr::null_mut()),
+            &mut len,
+        );
+        let mut buf: Vec<u16> = vec![0u16; len as usize + 1];
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        );
+        CloseHandle(handle);
+        if result.is_err() {
+            return Eligibility::Allowed;
+        }
+        let slice = &buf[..len as usize];
+        let sep = slice.iter().rposition(|&c| c == b'\\' as u16 || c == b'/' as u16);
+        let name_slice = match sep {
+            Some(pos) => &slice[pos + 1..],
+            None => slice,
+        };
+        String::from_utf16_lossy(name_slice).to_lowercase()
+    };
+
+    HOOK_CONFIG.with(|c| {
+        if let Some(ref cfg) = *c.borrow() {
+            let in_list = cfg.blacklist_apps.contains(&basename);
+            match cfg.blacklist_mode {
+                BlacklistMode::Blacklist => {
+                    if in_list { Eligibility::Denied } else { Eligibility::Allowed }
+                }
+                BlacklistMode::Whitelist => {
+                    if in_list { Eligibility::Allowed } else { Eligibility::Denied }
+                }
+            }
+        } else {
+            Eligibility::Allowed
+        }
+    })
 }
 
 fn enqueue_policy_resolution(pid: u32) {
