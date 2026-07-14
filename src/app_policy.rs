@@ -6,7 +6,7 @@
 //! unknown PIDs are resolved, then atomically publishes them.
 
 use crate::config::{BlacklistMode, ConfigSnapshot};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicPtr, Ordering};
 use windows::Win32::Foundation::HWND;
 
@@ -110,61 +110,49 @@ pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
     };
     use windows::Win32::Foundation::CloseHandle;
 
-    // 1. Open the process
-    let handle = unsafe {
+    let handle = match unsafe {
         OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-    };
-    let handle = match handle {
+    } {
         Ok(h) => h,
-        Err(_) => {
-            // Process may have exited or we lack permission — treat as unknown,
-            // let the default policy for the mode apply.
-            return None;
-        }
+        Err(_) => return None,
     };
 
-    // 2. Query the full process image name
+    // Two-call pattern: first call gets required buffer size.
     let basename = unsafe {
-        let mut buf = [0u16; 260];
-        let mut len = buf.len() as u32;
-        let result = QueryFullProcessImageNameW(
+        let mut len: u32 = 0;
+        let _ = QueryFullProcessImageNameW(
             handle,
             PROCESS_NAME_FORMAT(0), // PROCESS_NAME_WIN32
+            windows::core::PWSTR(std::ptr::null_mut()),
+            &mut len,
+        );
+
+        let mut buf: Vec<u16> = vec![0u16; len as usize + 1];
+        let result = QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_FORMAT(0),
             windows::core::PWSTR(buf.as_mut_ptr()),
             &mut len,
         );
+        CloseHandle(handle);
         if result.is_err() {
-            CloseHandle(handle);
             return None;
         }
-        CloseHandle(handle);
 
-        let full = String::from_utf16_lossy(&buf[..len as usize]);
-        // 3. Extract basename
-        std::path::Path::new(&full)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or(&full)
-            .to_lowercase()
+        // Walk the u16 slice backwards to find the last path separator,
+        // extracting only the basename — no full-path heap allocation.
+        let slice = &buf[..len as usize];
+        let sep = slice.iter().rposition(|&c| c == b'\\' as u16 || c == b'/' as u16);
+        let name_slice = match sep {
+            Some(pos) => &slice[pos + 1..],
+            None => slice,
+        };
+        String::from_utf16_lossy(name_slice).to_lowercase()
     };
 
-    // 4. Match against blacklist_apps (case-insensitive)
-    let is_eligible = match &snapshot.blacklist_mode {
-        BlacklistMode::Blacklist => {
-            !snapshot
-                .blacklist_apps
-                .iter()
-                .any(|app| app.to_lowercase() == basename)
-        }
-        BlacklistMode::Whitelist => {
-            snapshot
-                .blacklist_apps
-                .iter()
-                .any(|app| app.to_lowercase() == basename)
-        }
-    };
+    let is_eligible = is_app_eligible(&snapshot.blacklist_mode, &snapshot.blacklist_apps, &basename);
 
-    log::info!(
+    log::debug!(
         "Policy resolved: pid={} basename={} eligible={}",
         pid,
         basename,
@@ -175,6 +163,21 @@ pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
         basename,
         is_eligible,
     })
+}
+
+/// Check whether an app basename is eligible given the list mode.
+/// Both `blacklist_apps` entries and `basename` must already be
+/// lowercased (normalised at config-compile time).
+fn is_app_eligible(
+    mode: &BlacklistMode,
+    blacklist_apps: &HashSet<String>,
+    basename: &str,
+) -> bool {
+    let in_list = blacklist_apps.contains(basename);
+    match mode {
+        BlacklistMode::Blacklist => !in_list,
+        BlacklistMode::Whitelist => in_list,
+    }
 }
 
 /// The PID→policy cache (legacy type, retained for compatibility with
