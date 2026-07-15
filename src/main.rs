@@ -1,3 +1,5 @@
+//! Mouse Gesture Daemon — Windows entry point, message pump,
+//! config loading, action dispatch, and custom file logger.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use anyhow::Result;
