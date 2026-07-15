@@ -215,6 +215,10 @@ fn run() -> Result<()> {
     info!("Direction overlay created");
 
     // State
+    // DaemonState stays on the owning thread. The Arc is used only for
+    // ref-counted cleanup when reclaimed from GWLP_USERDATA — it never
+    // crosses threads. OverlayWindow's raw GDI handles are not Send but
+    // that's irrelevant here.
     #[allow(clippy::arc_with_non_send_sync)]
     let state = Arc::new(Mutex::new(DaemonState {
         config,

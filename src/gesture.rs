@@ -308,16 +308,18 @@ fn max_distance(points: &[Point], start: usize, end: usize) -> (usize, f64) {
 
     if line_len_sq < 1e-10 {
         // Degenerate line — use point-to-point distance from p0
-        for (i, &pt) in points.iter().enumerate().take(end).skip(start + 1) {
-            let d = point_dist_sq(pt, p0);
+        #[allow(clippy::needless_range_loop)]
+        for i in (start + 1)..end {
+            let d = point_dist_sq(points[i], p0);
             if d > max_dist_sq {
                 max_dist_sq = d;
                 max_idx = i;
             }
         }
     } else {
-        for (i, &pt) in points.iter().enumerate().take(end).skip(start + 1) {
-            let d = perpendicular_dist_sq(pt, p0, p1, line_len_sq);
+        #[allow(clippy::needless_range_loop)]
+        for i in (start + 1)..end {
+            let d = perpendicular_dist_sq(points[i], p0, p1, line_len_sq);
             if d > max_dist_sq {
                 max_dist_sq = d;
                 max_idx = i;
