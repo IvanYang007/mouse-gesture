@@ -115,23 +115,28 @@ pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
         Err(_) => return None,
     };
 
-    // Two-call pattern: first call gets required buffer size.
+    // Allocate a generous buffer — the null-buffer two-call pattern
+    // is unreliable for QueryFullProcessImageNameW.
     let basename = unsafe {
-        let mut len: u32 = 0;
-        let _ = QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_FORMAT(0), // PROCESS_NAME_WIN32
-            windows::core::PWSTR(std::ptr::null_mut()),
-            &mut len,
-        );
-
-        let mut buf: Vec<u16> = vec![0u16; len as usize + 1];
+        let mut len: u32 = 512;
+        let mut buf: Vec<u16> = vec![0u16; len as usize];
         let result = QueryFullProcessImageNameW(
             handle,
-            PROCESS_NAME_FORMAT(0),
+            PROCESS_NAME_FORMAT(0), // PROCESS_NAME_WIN32
             windows::core::PWSTR(buf.as_mut_ptr()),
             &mut len,
         );
+        let result = if result.is_err() {
+            buf.resize(len as usize, 0);
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+        } else {
+            result
+        };
         let _ = CloseHandle(handle);
         if result.is_err() {
             return None;

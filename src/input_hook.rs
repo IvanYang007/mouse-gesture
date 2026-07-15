@@ -536,6 +536,12 @@ fn handle_right_down(
     }
 
     let (target_hwnd, target_pid) = resolve_window_under_cursor(x, y);
+    log::debug!(
+        "right-down: pid={} hwnd=0x{:x} self_pid={}",
+        target_pid,
+        target_hwnd.0 as usize,
+        std::process::id()
+    );
 
     // Determine eligibility from atomic policy snapshot
     let is_eligible = if target_pid == 0 || target_pid == std::process::id() {
@@ -543,8 +549,14 @@ fn handle_right_down(
     } else {
         match app_policy::get_snapshot() {
             Some(snapshot) => match snapshot.lookup(target_pid) {
-                Some(Eligibility::Allowed) => true,
-                Some(Eligibility::Denied) => false,
+                Some(Eligibility::Allowed) => {
+                    log::debug!("policy: pid={} cached=Allowed", target_pid);
+                    true
+                }
+                Some(Eligibility::Denied) => {
+                    log::debug!("policy: pid={} cached=Denied", target_pid);
+                    false
+                }
                 None => {
                     // PID unknown — resolve synchronously in the hook callback.
                     // Background resolution is too slow: by the time the policy
@@ -560,7 +572,10 @@ fn handle_right_down(
                     eligibility == Eligibility::Allowed
                 }
             },
-            None => true,
+            None => {
+                log::warn!("policy: NO SNAPSHOT — allowing pid={}", target_pid);
+                true
+            }
         }
     };
 
@@ -578,6 +593,7 @@ fn handle_right_down(
                 .with(|c| c.borrow().as_ref().map(|cfg| cfg.generation).unwrap_or(0)),
         })
     } else {
+        log::debug!("right-down: pid={} INELIGIBLE", target_pid);
         None
     };
 
@@ -827,35 +843,73 @@ fn enqueue_replay(replay: ClickReplay) {
 /// Called inline when the PID is not yet in the PolicySnapshot cache.
 /// Uses OpenProcess + QueryFullProcessImageNameW + blacklist check.
 fn resolve_pid_sync(pid: u32) -> Eligibility {
+    log::debug!("resolve_pid_sync: ENTER pid={}", pid);
     use crate::config::BlacklistMode;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_INFORMATION,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
 
     let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
-        Ok(h) => h,
-        Err(_) => return Eligibility::Allowed,
+        Ok(h) => {
+            log::debug!("resolve_pid_sync: OpenProcess(LIMITED) ok pid={}", pid);
+            h
+        }
+        Err(e) => {
+            log::debug!(
+                "resolve_pid_sync: OpenProcess(LIMITED) failed for pid={}: {:?}",
+                pid,
+                e
+            );
+            // Retry with PROCESS_QUERY_INFORMATION — some apps (e.g.,
+            // elevated processes) reject LIMITED access.
+            match unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) } {
+                Ok(h) => h,
+                Err(e2) => {
+                    log::debug!(
+                        "resolve_pid_sync: OpenProcess(QUERY) also failed for pid={}: {:?} — allowing",
+                        pid,
+                        e2
+                    );
+                    return Eligibility::Allowed;
+                }
+            }
+        }
     };
 
     let basename = unsafe {
-        let mut len: u32 = 0;
-        let _ = QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_FORMAT(0),
-            windows::core::PWSTR(std::ptr::null_mut()),
-            &mut len,
-        );
-        let mut buf: Vec<u16> = vec![0u16; len as usize + 1];
+        // Allocate a generous buffer upfront — the two-call pattern
+        // (null → len → resize) is unreliable for QueryFullProcessImageNameW
+        // because the first call with a null buffer does not update len.
+        let mut len: u32 = 512;
+        let mut buf: Vec<u16> = vec![0u16; len as usize];
         let result = QueryFullProcessImageNameW(
             handle,
             PROCESS_NAME_FORMAT(0),
             windows::core::PWSTR(buf.as_mut_ptr()),
             &mut len,
         );
+        // If 512 chars wasn't enough (unlikely), len now holds the required
+        // size — resize and retry once.
+        let result = if result.is_err() {
+            buf.resize(len as usize, 0);
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_FORMAT(0),
+                windows::core::PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+        } else {
+            result
+        };
         let _ = CloseHandle(handle);
         if result.is_err() {
+            log::debug!(
+                "resolve_pid_sync: QueryFullProcessImageNameW failed for pid={}: {:?}",
+                pid,
+                result
+            );
             return Eligibility::Allowed;
         }
         let slice = &buf[..len as usize];
@@ -872,7 +926,7 @@ fn resolve_pid_sync(pid: u32) -> Eligibility {
     HOOK_CONFIG.with(|c| {
         if let Some(ref cfg) = *c.borrow() {
             let in_list = cfg.blacklist_apps.contains(&basename);
-            match cfg.blacklist_mode {
+            let result = match cfg.blacklist_mode {
                 BlacklistMode::Blacklist => {
                     if in_list {
                         Eligibility::Denied
@@ -887,7 +941,16 @@ fn resolve_pid_sync(pid: u32) -> Eligibility {
                         Eligibility::Denied
                     }
                 }
-            }
+            };
+            log::debug!(
+                "policy: pid={} basename={} mode={:?} in_list={} => {:?}",
+                pid,
+                basename,
+                cfg.blacklist_mode,
+                in_list,
+                result
+            );
+            result
         } else {
             Eligibility::Allowed
         }
