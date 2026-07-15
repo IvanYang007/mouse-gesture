@@ -25,7 +25,7 @@ fn gesture_buffer_handles_oversized_input_gracefully() {
     // Buffer should still be usable after stress
     let result = buf.add_point(Point { x: 100, y: 100 });
     assert!(
-        result || buf.len() > 0,
+        result || !buf.is_empty(),
         "buffer should have points or accept new ones"
     );
 }
@@ -38,7 +38,7 @@ fn gesture_buffer_resets_correctly() {
         for i in 0..20 {
             buf.add_point(Point { x: i * 10, y: 50 });
         }
-        assert!(buf.len() > 0);
+        assert!(!buf.is_empty());
     }
 }
 

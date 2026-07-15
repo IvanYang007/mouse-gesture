@@ -220,10 +220,12 @@ pub fn open(owner: HWND, path: PathBuf) -> Result<()> {
         let col_defs = [("Name\0", 200i32), ("Pattern\0", 120), ("Action\0", 150)];
         for (i, (name, width)) in col_defs.iter().enumerate() {
             let wide: Vec<u16> = name.encode_utf16().collect();
-            let mut col = LVCOLUMNW::default();
-            col.mask = LVCF_TEXT;
-            col.pszText = PWSTR(wide.as_ptr() as *mut _);
-            col.cx = *width;
+            let col = LVCOLUMNW {
+                mask: LVCF_TEXT,
+                pszText: PWSTR(wide.as_ptr() as *mut _),
+                cx: *width,
+                ..Default::default()
+            };
             unsafe {
                 SendMessageW(
                     h_listview,
@@ -702,7 +704,7 @@ unsafe extern "system" fn editor_proc(
             let state = unsafe { &mut *state_ptr };
 
             let cmd = (wparam.0 as u32 & 0xffff) as u16;
-            let notify = (wparam.0 as u32 >> 16) as u32;
+            let notify = wparam.0 as u32 >> 16;
 
             match cmd {
                 // ── Save / Cancel ─────────────────────────
@@ -946,11 +948,13 @@ fn populate_listview(state: &EditorState) {
 
         // Column 0: Name
         let mut name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        let mut item = LVITEMW::default();
-        item.mask = LVIF_TEXT;
-        item.iItem = index as i32;
-        item.iSubItem = 0;
-        item.pszText = PWSTR(name_wide.as_mut_ptr());
+        let mut item = LVITEMW {
+            mask: LVIF_TEXT,
+            iItem: index as i32,
+            iSubItem: 0,
+            pszText: PWSTR(name_wide.as_mut_ptr()),
+            ..Default::default()
+        };
         unsafe {
             SendMessageW(
                 state.h_listview,
@@ -1241,9 +1245,11 @@ unsafe fn deselect_listview(state: &EditorState) {
     );
     let item_count = count.0 as i32;
     for _i in 0..item_count {
-        let mut item = LVITEMW::default();
-        item.stateMask = LVIS_SELECTED;
-        item.state = LVIS_SELECTED;
+        let item = LVITEMW {
+            stateMask: LVIS_SELECTED,
+            state: LVIS_SELECTED,
+            ..Default::default()
+        };
         SendMessageW(
             state.h_listview,
             LVM_SETITEMW,
@@ -1277,11 +1283,9 @@ unsafe fn handle_list_selection_change(state: &mut EditorState, selected: bool, 
             Some(WPARAM(usize::MAX)),
             Some(LPARAM(2u32 as isize)), // LVNI_SELECTED
         );
-        if next.0 == -1 {
-            if !state.is_adding {
-                state.selected_index = None;
-                update_form_visibility(state);
-            }
+        if next.0 == -1 && !state.is_adding {
+            state.selected_index = None;
+            update_form_visibility(state);
         }
     }
 }
@@ -1716,8 +1720,10 @@ unsafe fn update_listview_row(state: &EditorState, index: usize) {
         })
         .unwrap_or_else(|| "Unknown".to_string());
 
-    let mut item = LVITEMW::default();
-    item.mask = LVIF_TEXT;
+    let mut item = LVITEMW {
+        mask: LVIF_TEXT,
+        ..Default::default()
+    };
 
     // Column 0: Name
     let mut name_wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
@@ -1905,9 +1911,11 @@ unsafe fn validate_and_insert_gesture(state: &mut EditorState) -> bool {
         Some(LPARAM(0)),
     );
     if count.0 > 0 {
-        let mut item = LVITEMW::default();
-        item.stateMask = LVIS_SELECTED;
-        item.state = LVIS_SELECTED;
+        let item = LVITEMW {
+            stateMask: LVIS_SELECTED,
+            state: LVIS_SELECTED,
+            ..Default::default()
+        };
         SendMessageW(
             state.h_listview,
             LVM_SETITEMW,
@@ -2285,7 +2293,7 @@ fn validate_form(state: &EditorState) -> Result<()> {
                         let has_combo = action
                             .get("combo")
                             .and_then(|v| v.as_array())
-                            .map_or(false, |arr| !arr.is_empty());
+                            .is_some_and(|arr| !arr.is_empty());
                         if !has_combo {
                             return Err(anyhow::anyhow!(
                                 "Keyboard combo is empty for gesture '{}'.",

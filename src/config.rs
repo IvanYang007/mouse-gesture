@@ -46,17 +46,12 @@ pub struct Blacklist {
     pub apps: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum BlacklistMode {
+    #[default]
     Blacklist,
     Whitelist,
-}
-
-impl Default for BlacklistMode {
-    fn default() -> Self {
-        BlacklistMode::Blacklist
-    }
 }
 
 impl Default for Blacklist {
@@ -125,9 +120,11 @@ pub enum Direction {
     NW,
 }
 
-impl Direction {
+impl std::str::FromStr for Direction {
+    type Err = anyhow::Error;
+
     /// Parse a direction token from config text.
-    pub fn from_str(s: &str) -> Result<Self> {
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s.to_uppercase().as_str() {
             "N" | "U" => Ok(Direction::N),
             "NE" | "UR" => Ok(Direction::NE),
@@ -240,7 +237,7 @@ impl ConfigFile {
             let pattern: Vec<Direction> = def
                 .pattern
                 .split_whitespace()
-                .map(Direction::from_str)
+                .map(|s| s.parse::<Direction>())
                 .collect::<Result<Vec<_>>>()
                 .with_context(|| format!("gesture '{}': invalid pattern", name))?;
 
@@ -304,6 +301,7 @@ impl ConfigFile {
     }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for ConfigFile {
     fn default() -> Self {
         ConfigFile {

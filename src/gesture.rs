@@ -152,6 +152,11 @@ impl GestureBuffer {
         self.len
     }
 
+    /// Returns true if the buffer contains no points.
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     /// Return the last two points if available, for direction computation.
     pub fn last_two(&self) -> Option<(Point, Point)> {
         if self.len >= 2 {
@@ -303,16 +308,16 @@ fn max_distance(points: &[Point], start: usize, end: usize) -> (usize, f64) {
 
     if line_len_sq < 1e-10 {
         // Degenerate line — use point-to-point distance from p0
-        for i in (start + 1)..end {
-            let d = point_dist_sq(points[i], p0);
+        for (i, &pt) in points.iter().enumerate().take(end).skip(start + 1) {
+            let d = point_dist_sq(pt, p0);
             if d > max_dist_sq {
                 max_dist_sq = d;
                 max_idx = i;
             }
         }
     } else {
-        for i in (start + 1)..end {
-            let d = perpendicular_dist_sq(points[i], p0, p1, line_len_sq);
+        for (i, &pt) in points.iter().enumerate().take(end).skip(start + 1) {
+            let d = perpendicular_dist_sq(pt, p0, p1, line_len_sq);
             if d > max_dist_sq {
                 max_dist_sq = d;
                 max_idx = i;
@@ -387,7 +392,7 @@ fn angle_to_direction(angle_deg: f64) -> Direction {
     // S:   247.5-292.5
     // SE:  292.5-337.5
 
-    if a < 22.5 || a >= 337.5 {
+    if !(22.5..337.5).contains(&a) {
         Direction::E
     } else if a < 67.5 {
         Direction::NE
@@ -554,7 +559,7 @@ mod tests {
             }
         }
         // Buffer should still contain points (decimated)
-        assert!(buf.len() > 0);
+        assert!(!buf.is_empty());
     }
 
     use proptest::prelude::*;
@@ -623,7 +628,7 @@ mod tests {
             }
         }
         // Buffer should have points after decimation
-        assert!(buf.len() > 0);
+        assert!(!buf.is_empty());
         assert!(buf.len() < total);
     }
 }
