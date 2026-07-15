@@ -30,10 +30,10 @@ pub fn direction_from_points(from: Point, to: Point) -> Direction {
     let abs_dx = dx.unsigned_abs();
     let abs_dy = dy.unsigned_abs();
 
-    // tan(22.5°) ≈ 0.4142  → threshold: abs_dx * 241 > abs_dy * 100  means near-horizontal
-    // tan(67.5°) ≈ 2.4142  → threshold: abs_dy * 241 > abs_dx * 100  means near-vertical
-    let near_horiz = abs_dx * 241 > abs_dy * 100; // |dx/dy| > ~2.41 → cardinal E/W
-    let near_vert = abs_dy * 241 > abs_dx * 100; // |dy/dx| > ~2.41 → cardinal N/S
+    // tan(22.5°) ≈ 0.4142  → |dy|/|dx| < 0.415 → within 22.5° of E/W
+    // tan(67.5°) ≈ 2.4142  → |dx|/|dy| < 0.415 → within 22.5° of N/S
+    let near_horiz = abs_dy * 241 < abs_dx * 100;
+    let near_vert = abs_dx * 241 < abs_dy * 100;
 
     if near_horiz {
         if dx > 0 {
@@ -531,6 +531,45 @@ mod tests {
         assert_eq!(angle_to_direction(-135.0), Direction::SW);
         assert_eq!(angle_to_direction(-90.0), Direction::S);
         assert_eq!(angle_to_direction(-45.0), Direction::SE);
+    }
+
+    #[test]
+    fn direction_from_points_covers_all_octants() {
+        // Use vectors with ~30° angles (5:10 ratio ≈ 26.6°) to clearly
+        // land in diagonal sectors, and pure axis for cardinals.
+        let o = Point { x: 0, y: 0 };
+        assert_eq!(
+            direction_from_points(o, Point { x: 10, y: 0 }),
+            Direction::E
+        );
+        assert_eq!(
+            direction_from_points(o, Point { x: 5, y: -10 }),
+            Direction::NE
+        );
+        assert_eq!(
+            direction_from_points(o, Point { x: 0, y: -10 }),
+            Direction::N
+        );
+        assert_eq!(
+            direction_from_points(o, Point { x: -5, y: -10 }),
+            Direction::NW
+        );
+        assert_eq!(
+            direction_from_points(o, Point { x: -10, y: 0 }),
+            Direction::W
+        );
+        assert_eq!(
+            direction_from_points(o, Point { x: -5, y: 10 }),
+            Direction::SW
+        );
+        assert_eq!(
+            direction_from_points(o, Point { x: 0, y: 10 }),
+            Direction::S
+        );
+        assert_eq!(
+            direction_from_points(o, Point { x: 5, y: 10 }),
+            Direction::SE
+        );
     }
 
     #[test]
