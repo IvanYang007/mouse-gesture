@@ -176,14 +176,8 @@ fn run() -> Result<()> {
         })?;
 
     // Hook thread + recognition worker + replay worker + policy worker
-    let (
-        _hook_handle,
-        _recog_handle,
-        _replay_handle,
-        _hook_shared,
-        hook_ctrl,
-        hook_event_rx,
-    ) = input_hook::spawn_hook_thread(3, 2, hwnd.0 as isize);
+    let (_hook_handle, _recog_handle, _replay_handle, _hook_shared, hook_ctrl, hook_event_rx) =
+        input_hook::spawn_hook_thread(3, 2, hwnd.0 as isize);
 
     // Publish initial policy snapshot
     if let Some(ref cfg) = config {
@@ -407,8 +401,8 @@ fn execute_window_action(cmd: &mouse_gesture::config::WindowCommand, target_hwnd
     use mouse_gesture::config::WindowCommand;
     use mouse_gesture::window_ops::{enumerate_monitors, SnapPosition};
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, IsWindow, PostMessageW, ShowWindowAsync,
-        SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, WM_CLOSE,
+        GetForegroundWindow, IsWindow, PostMessageW, ShowWindowAsync, SW_MAXIMIZE, SW_MINIMIZE,
+        SW_RESTORE, WM_CLOSE,
     };
 
     // Validate target_hwnd — fall back to foreground if invalid
@@ -444,7 +438,9 @@ fn execute_window_action(cmd: &mouse_gesture::config::WindowCommand, target_hwnd
         WindowCommand::SnapTopLeft => do_snap(hwnd, monitors.first(), SnapPosition::TopLeft),
         WindowCommand::SnapTopRight => do_snap(hwnd, monitors.first(), SnapPosition::TopRight),
         WindowCommand::SnapBottomLeft => do_snap(hwnd, monitors.first(), SnapPosition::BottomLeft),
-        WindowCommand::SnapBottomRight => do_snap(hwnd, monitors.first(), SnapPosition::BottomRight),
+        WindowCommand::SnapBottomRight => {
+            do_snap(hwnd, monitors.first(), SnapPosition::BottomRight)
+        }
         WindowCommand::Center => do_snap(hwnd, monitors.first(), SnapPosition::Center),
         WindowCommand::ToggleAlwaysOnTop => {
             info!("ToggleAlwaysOnTop not yet implemented");
@@ -458,9 +454,15 @@ fn execute_window_action(cmd: &mouse_gesture::config::WindowCommand, target_hwnd
 }
 
 /// Execute a snap/positioning operation on a window.
-fn do_snap(hwnd: HWND, monitor: Option<&mouse_gesture::window_ops::MonitorInfo>, position: mouse_gesture::window_ops::SnapPosition) {
+fn do_snap(
+    hwnd: HWND,
+    monitor: Option<&mouse_gesture::window_ops::MonitorInfo>,
+    position: mouse_gesture::window_ops::SnapPosition,
+) {
     use mouse_gesture::window_ops::snap_rect;
-    use windows::Win32::UI::WindowsAndMessaging::{SetWindowPos, HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOP, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE,
+    };
     if let Some(m) = monitor {
         let r = snap_rect(m, position);
         unsafe {

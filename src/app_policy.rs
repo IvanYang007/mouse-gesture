@@ -104,15 +104,13 @@ pub fn get_snapshot() -> Option<&'static PolicySnapshot> {
 /// Resolve a PID to its basename and eligibility.
 /// Called by the policy worker thread for unknown PIDs encountered by the hook.
 pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows::Win32::Foundation::CloseHandle;
 
-    let handle = match unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-    } {
+    let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(h) => h,
         Err(_) => return None,
     };
@@ -142,7 +140,9 @@ pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
         // Walk the u16 slice backwards to find the last path separator,
         // extracting only the basename — no full-path heap allocation.
         let slice = &buf[..len as usize];
-        let sep = slice.iter().rposition(|&c| c == b'\\' as u16 || c == b'/' as u16);
+        let sep = slice
+            .iter()
+            .rposition(|&c| c == b'\\' as u16 || c == b'/' as u16);
         let name_slice = match sep {
             Some(pos) => &slice[pos + 1..],
             None => slice,
@@ -150,7 +150,11 @@ pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
         String::from_utf16_lossy(name_slice).to_lowercase()
     };
 
-    let is_eligible = is_app_eligible(&snapshot.blacklist_mode, &snapshot.blacklist_apps, &basename);
+    let is_eligible = is_app_eligible(
+        &snapshot.blacklist_mode,
+        &snapshot.blacklist_apps,
+        &basename,
+    );
 
     log::debug!(
         "Policy resolved: pid={} basename={} eligible={}",
@@ -168,11 +172,7 @@ pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
 /// Check whether an app basename is eligible given the list mode.
 /// Both `blacklist_apps` entries and `basename` must already be
 /// lowercased (normalised at config-compile time).
-fn is_app_eligible(
-    mode: &BlacklistMode,
-    blacklist_apps: &HashSet<String>,
-    basename: &str,
-) -> bool {
+fn is_app_eligible(mode: &BlacklistMode, blacklist_apps: &HashSet<String>, basename: &str) -> bool {
     let in_list = blacklist_apps.contains(basename);
     match mode {
         BlacklistMode::Blacklist => !in_list,

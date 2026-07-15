@@ -9,9 +9,8 @@ use windows::Win32::Graphics::Gdi::{
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW, GetDC,
     PatBlt, ReleaseDC, SelectObject, SetBkMode, SetTextColor, AC_SRC_ALPHA, BITMAPINFO,
     BITMAPINFOHEADER, BLACKNESS, BLENDFUNCTION, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
-    DEFAULT_QUALITY, DIB_RGB_COLORS, DT_CENTER, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER,
-    HBITMAP, HDC, HFONT,
-    OUT_DEFAULT_PRECIS, TRANSPARENT,
+    DEFAULT_QUALITY, DIB_RGB_COLORS, DT_CENTER, DT_NOCLIP, DT_SINGLELINE, DT_VCENTER, HBITMAP, HDC,
+    HFONT, OUT_DEFAULT_PRECIS, TRANSPARENT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetSystemMetrics, RegisterClassExW, ShowWindow,
@@ -87,7 +86,9 @@ impl OverlayWindow {
             SetTextColor(hdc, COLORREF(0x00FFFFFF));
         }
 
-        unsafe { let _ = ShowWindow(hwnd, SW_HIDE); };
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        };
 
         Ok(OverlayWindow {
             hwnd,
@@ -205,7 +206,9 @@ impl OverlayWindow {
     }
 
     pub fn hide(&self) {
-        unsafe { let _ = ShowWindow(self.hwnd, SW_HIDE); };
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        };
     }
 
     pub fn destroy(&self) {

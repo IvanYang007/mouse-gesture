@@ -814,15 +814,13 @@ fn enqueue_replay(replay: ClickReplay) {
 /// Uses OpenProcess + QueryFullProcessImageNameW + blacklist check.
 fn resolve_pid_sync(pid: u32) -> Eligibility {
     use crate::config::BlacklistMode;
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
         PROCESS_QUERY_LIMITED_INFORMATION,
     };
-    use windows::Win32::Foundation::CloseHandle;
 
-    let handle = match unsafe {
-        OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-    } {
+    let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
         Ok(h) => h,
         Err(_) => return Eligibility::Allowed,
     };
@@ -847,7 +845,9 @@ fn resolve_pid_sync(pid: u32) -> Eligibility {
             return Eligibility::Allowed;
         }
         let slice = &buf[..len as usize];
-        let sep = slice.iter().rposition(|&c| c == b'\\' as u16 || c == b'/' as u16);
+        let sep = slice
+            .iter()
+            .rposition(|&c| c == b'\\' as u16 || c == b'/' as u16);
         let name_slice = match sep {
             Some(pos) => &slice[pos + 1..],
             None => slice,
@@ -860,10 +860,18 @@ fn resolve_pid_sync(pid: u32) -> Eligibility {
             let in_list = cfg.blacklist_apps.contains(&basename);
             match cfg.blacklist_mode {
                 BlacklistMode::Blacklist => {
-                    if in_list { Eligibility::Denied } else { Eligibility::Allowed }
+                    if in_list {
+                        Eligibility::Denied
+                    } else {
+                        Eligibility::Allowed
+                    }
                 }
                 BlacklistMode::Whitelist => {
-                    if in_list { Eligibility::Allowed } else { Eligibility::Denied }
+                    if in_list {
+                        Eligibility::Allowed
+                    } else {
+                        Eligibility::Denied
+                    }
                 }
             }
         } else {
