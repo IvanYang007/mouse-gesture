@@ -321,6 +321,12 @@ fn process_hook_command(cmd: HookCommand, shared: &HookShared) {
         }
         HookCommand::UpdateConfig(snapshot) => {
             let n = snapshot.gestures.len();
+            // Pre-build Arc<Vec<PatternDef>> so gesture completion only
+            // bumps a ref-count instead of allocating + cloning the pattern list.
+            let patterns = Arc::new(snapshot.gestures.clone());
+            HOOK_PATTERNS.with(|c| {
+                *c.borrow_mut() = Some(patterns);
+            });
             HOOK_CONFIG.with(|c| {
                 *c.borrow_mut() = Some(snapshot);
             });
@@ -368,6 +374,10 @@ fn process_hook_command(cmd: HookCommand, shared: &HookShared) {
 
 thread_local! {
     static HOOK_CONFIG: std::cell::RefCell<Option<ConfigSnapshot>> = const { std::cell::RefCell::new(None) };
+    /// Pre-built gesture patterns wrapped in Arc, refreshed on config update.
+    /// The hook callback clones this Arc (ref-count bump only) instead of
+    /// allocating a new Arc<Vec<PatternDef>> on every gesture completion.
+    static HOOK_PATTERNS: std::cell::RefCell<Option<Arc<Vec<PatternDef>>>> = const { std::cell::RefCell::new(None) };
     static HOOK_BUFFER: std::cell::RefCell<Option<GestureBuffer>> = const { std::cell::RefCell::new(None) };
     static HOOK_STATE_MACHINE: std::cell::RefCell<Option<StateMachine>> = const { std::cell::RefCell::new(None) };
     static HOOK_EVENT_TX: std::cell::OnceCell<std::sync::mpsc::Sender<HookEvent>> = const { std::cell::OnceCell::new() };
@@ -457,13 +467,9 @@ unsafe extern "system" fn low_level_mouse_proc(
     if !HOOK_INTERCEPTION_ENABLED.with(|c| *c.borrow()) {
         return CallNextHookEx(None, code, wparam, lparam);
     }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        process_mouse_event(code, wparam, lparam)
-    }));
-    match result {
-        Ok(r) => r,
-        Err(_) => CallNextHookEx(None, code, wparam, lparam),
-    }
+    // Panic protection lives inside process_mouse_event, after the
+    // non-gesture early-return — most mouse events never reach it.
+    process_mouse_event(code, wparam, lparam)
 }
 
 fn process_mouse_event(_code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -500,12 +506,18 @@ fn process_mouse_event(_code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     let x = hook_data.pt.x;
     let y = hook_data.pt.y;
 
-    if msg == WM_RBUTTONDOWN {
-        handle_right_down(_code, wparam, lparam, origin, x, y)
-    } else if msg == WM_RBUTTONUP {
-        handle_right_up(_code, wparam, lparam, origin, x, y)
-    } else {
-        handle_mouse_move(_code, wparam, lparam, origin, x, y)
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if msg == WM_RBUTTONDOWN {
+            handle_right_down(_code, wparam, lparam, origin, x, y)
+        } else if msg == WM_RBUTTONUP {
+            handle_right_up(_code, wparam, lparam, origin, x, y)
+        } else {
+            handle_mouse_move(_code, wparam, lparam, origin, x, y)
+        }
+    }));
+    match result {
+        Ok(r) => r,
+        Err(_) => unsafe { CallNextHookEx(None, _code, wparam, lparam) },
     }
 }
 
@@ -670,16 +682,18 @@ fn handle_right_up(
                     .unwrap_or(0)
             });
 
-            // Bake classification params from config into the completion packet
-            // so the recognition worker never touches thread-local state
-            let (patterns, rdp_epsilon_sq, min_gesture_length) = HOOK_CONFIG.with(|c| {
+            // Snapshot rdp_epsilon and min_gesture_length from config.
+            // Patterns come from HOOK_PATTERNS (pre-built Arc, ref-count bump only).
+            let (rdp_epsilon_sq, min_gesture_length) = HOOK_CONFIG.with(|c| {
                 let cfg = c.borrow();
                 let cfg = cfg.as_ref().expect("HOOK_CONFIG not initialized");
-                (
-                    Arc::new(cfg.gestures.clone()),
-                    cfg.rdp_epsilon_sq,
-                    cfg.min_gesture_length,
-                )
+                (cfg.rdp_epsilon_sq, cfg.min_gesture_length)
+            });
+            let patterns = HOOK_PATTERNS.with(|c| {
+                c.borrow()
+                    .as_ref()
+                    .expect("HOOK_PATTERNS not initialized")
+                    .clone() // Arc clone: ref-count bump, no allocation
             });
 
             HOOK_BUFFER.with(|buf_cell| {
