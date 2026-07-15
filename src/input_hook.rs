@@ -843,7 +843,6 @@ fn enqueue_replay(replay: ClickReplay) {
 /// Called inline when the PID is not yet in the PolicySnapshot cache.
 /// Uses OpenProcess + QueryFullProcessImageNameW + blacklist check.
 fn resolve_pid_sync(pid: u32) -> Eligibility {
-    log::debug!("resolve_pid_sync: ENTER pid={}", pid);
     use crate::config::BlacklistMode;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
@@ -852,28 +851,13 @@ fn resolve_pid_sync(pid: u32) -> Eligibility {
     };
 
     let handle = match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
-        Ok(h) => {
-            log::debug!("resolve_pid_sync: OpenProcess(LIMITED) ok pid={}", pid);
-            h
-        }
-        Err(e) => {
-            log::debug!(
-                "resolve_pid_sync: OpenProcess(LIMITED) failed for pid={}: {:?}",
-                pid,
-                e
-            );
+        Ok(h) => h,
+        Err(_) => {
             // Retry with PROCESS_QUERY_INFORMATION — some apps (e.g.,
             // elevated processes) reject LIMITED access.
             match unsafe { OpenProcess(PROCESS_QUERY_INFORMATION, false, pid) } {
                 Ok(h) => h,
-                Err(e2) => {
-                    log::debug!(
-                        "resolve_pid_sync: OpenProcess(QUERY) also failed for pid={}: {:?} — allowing",
-                        pid,
-                        e2
-                    );
-                    return Eligibility::Allowed;
-                }
+                Err(_) => return Eligibility::Allowed,
             }
         }
     };
