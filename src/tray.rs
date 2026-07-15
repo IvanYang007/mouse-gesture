@@ -64,33 +64,33 @@ pub fn show_context_menu(hwnd: HWND) -> Result<Option<TrayCommand>> {
         impl Drop for MenuGuard {
             fn drop(&mut self) {
                 unsafe {
-                    DestroyMenu(self.0);
+                    let _ = DestroyMenu(self.0);
                 }
             }
         }
         let menu = MenuGuard(menu);
 
-        AppendMenuW(
+        let _ = AppendMenuW(
             menu.0,
             MF_STRING,
             IDM_CONFIGURE as usize,
             windows::core::w!("Configure..."),
         );
-        AppendMenuW(
+        let _ = AppendMenuW(
             menu.0,
             MF_STRING,
             IDM_RELOAD_CONFIG as usize,
             windows::core::w!("Reload configuration"),
         );
-        AppendMenuW(menu.0, MF_SEPARATOR, 0, None);
-        AppendMenuW(
+        let _ = AppendMenuW(menu.0, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(
             menu.0,
             MF_STRING,
             IDM_OPEN_CONFIG_FOLDER as usize,
             windows::core::w!("Open configuration folder"),
         );
-        AppendMenuW(menu.0, MF_SEPARATOR, 0, None);
-        AppendMenuW(
+        let _ = AppendMenuW(menu.0, MF_SEPARATOR, 0, None);
+        let _ = AppendMenuW(
             menu.0,
             MF_STRING,
             IDM_EXIT as usize,
@@ -101,7 +101,7 @@ pub fn show_context_menu(hwnd: HWND) -> Result<Option<TrayCommand>> {
         GetCursorPos(&mut pt)?;
 
         // Required: set foreground so the menu can be dismissed by clicking away.
-        SetForegroundWindow(hwnd);
+        let _ = SetForegroundWindow(hwnd);
 
         let cmd = TrackPopupMenuEx(
             menu.0,
@@ -113,7 +113,7 @@ pub fn show_context_menu(hwnd: HWND) -> Result<Option<TrayCommand>> {
         );
 
         // Post benign message so the menu window finishes cleaning up.
-        PostMessageW(Some(hwnd), WM_NULL, WPARAM::default(), LPARAM::default());
+        let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM::default(), LPARAM::default());
 
         match cmd.0 as u32 {
             0 => Ok(None),

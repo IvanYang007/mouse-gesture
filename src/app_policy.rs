@@ -134,7 +134,7 @@ pub fn resolve_pid(pid: u32, snapshot: &ConfigSnapshot) -> Option<PolicyEntry> {
             windows::core::PWSTR(buf.as_mut_ptr()),
             &mut len,
         );
-        CloseHandle(handle);
+        let _ = CloseHandle(handle);
         if result.is_err() {
             return None;
         }

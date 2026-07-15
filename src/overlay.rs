@@ -87,7 +87,7 @@ impl OverlayWindow {
             SetTextColor(hdc, COLORREF(0x00FFFFFF));
         }
 
-        unsafe { ShowWindow(hwnd, SW_HIDE) };
+        unsafe { let _ = ShowWindow(hwnd, SW_HIDE); };
 
         Ok(OverlayWindow {
             hwnd,
@@ -157,7 +157,7 @@ impl OverlayWindow {
         let mut label_wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
 
         unsafe {
-            PatBlt(self.hdc, 0, 0, OVERLAY_W, OVERLAY_H, BLACKNESS);
+            let _ = PatBlt(self.hdc, 0, 0, OVERLAY_W, OVERLAY_H, BLACKNESS);
             let mut rect = RECT {
                 left: 0,
                 top: 0,
@@ -199,21 +199,21 @@ impl OverlayWindow {
                 Some(&blend),
                 ULW_ALPHA,
             );
-            ReleaseDC(None, screen_dc);
-            ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            let _ = ReleaseDC(None, screen_dc);
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
         }
     }
 
     pub fn hide(&self) {
-        unsafe { ShowWindow(self.hwnd, SW_HIDE) };
+        unsafe { let _ = ShowWindow(self.hwnd, SW_HIDE); };
     }
 
     pub fn destroy(&self) {
         unsafe {
-            DeleteObject(self.font.into());
-            DeleteObject(self.bitmap.into());
-            DeleteDC(self.hdc);
-            DestroyWindow(self.hwnd);
+            let _ = DeleteObject(self.font.into());
+            let _ = DeleteObject(self.bitmap.into());
+            let _ = DeleteDC(self.hdc);
+            let _ = DestroyWindow(self.hwnd);
         }
     }
 }

@@ -134,7 +134,6 @@ pub fn spawn_hook_thread(
     thread::JoinHandle<()>,
     thread::JoinHandle<()>,
     thread::JoinHandle<()>,
-    thread::JoinHandle<()>,
     Arc<HookShared>,
     HookController,
     std::sync::mpsc::Receiver<HookEvent>,
@@ -147,7 +146,6 @@ pub fn spawn_hook_thread(
     let shared_hook = shared.clone();
     let shared_recog = shared.clone();
     let shared_replay = shared.clone();
-    let shared_policy = shared.clone();
 
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<HookCommand>();
     let (event_tx, event_rx) = std::sync::mpsc::channel::<HookEvent>();
@@ -158,9 +156,6 @@ pub fn spawn_hook_thread(
 
     // Click replay channel
     let (replay_tx, replay_rx) = std::sync::mpsc::sync_channel::<ClickReplay>(1);
-
-    // Policy resolution queue
-    let (policy_tx, policy_rx) = std::sync::mpsc::channel::<PolicyRequest>();
 
     let event_tx_recog = event_tx.clone();
 
@@ -174,7 +169,6 @@ pub fn spawn_hook_thread(
                 event_tx.clone(),
                 completion_tx,
                 replay_tx,
-                policy_tx,
                 shared_hook.clone(),
                 ui_hwnd,
             );
@@ -182,7 +176,7 @@ pub fn spawn_hook_thread(
             // Create thread message queue before publishing thread ID
             let mut msg = MSG::default();
             unsafe {
-                PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
+                let _ = PeekMessageW(&mut msg, None, WM_USER, WM_USER, PM_NOREMOVE);
             }
             let thread_id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
             let _ = ready_tx.send(thread_id);
@@ -298,51 +292,6 @@ pub fn spawn_hook_thread(
         })
         .expect("spawn replay worker");
 
-    // ── Policy worker ──────────────────────────────────────────
-    let policy_handle = thread::Builder::new()
-        .name("policy-resolver".into())
-        .spawn(move || {
-            while let Ok(req) = policy_rx.recv() {
-                if shared_policy.shutdown.load(Ordering::Relaxed) {
-                    break;
-                }
-
-                let snapshot = app_policy::get_snapshot();
-                if let Some(current) = snapshot {
-                    let entry = app_policy::resolve_pid(req.pid, &req.config);
-                    let mut new_snapshot = app_policy::PolicySnapshot {
-                        mode: current.mode.clone(),
-                        generation: current.generation,
-                        known_pids: current.known_pids.clone(),
-                    };
-                    if let Some(entry) = entry {
-                        let eligibility = if entry.is_eligible {
-                            Eligibility::Allowed
-                        } else {
-                            Eligibility::Denied
-                        };
-                        let changed = new_snapshot.known_pids.insert(req.pid, eligibility)
-                            != Some(eligibility);
-                        if changed {
-                            log::debug!(
-                                "Policy: PID {} -> {} ({})",
-                                req.pid,
-                                entry.basename,
-                                if entry.is_eligible {
-                                    "allowed"
-                                } else {
-                                    "denied"
-                                }
-                            );
-                            app_policy::publish_snapshot(new_snapshot);
-                        }
-                    }
-                }
-            }
-            log::info!("Policy worker shut down");
-        })
-        .expect("spawn policy worker");
-
     let hook_thread_id = ready_rx.recv().expect("hook thread not ready");
     let controller = HookController {
         cmd_tx,
@@ -353,7 +302,6 @@ pub fn spawn_hook_thread(
         hook_handle,
         recog_handle,
         replay_handle,
-        policy_handle,
         shared,
         controller,
         event_rx,
@@ -425,7 +373,6 @@ thread_local! {
     static HOOK_EVENT_TX: std::cell::OnceCell<std::sync::mpsc::Sender<HookEvent>> = const { std::cell::OnceCell::new() };
     static HOOK_COMPLETION_TX: std::cell::OnceCell<std::sync::mpsc::SyncSender<GestureCompletion>> = const { std::cell::OnceCell::new() };
     static HOOK_REPLAY_TX: std::cell::OnceCell<std::sync::mpsc::SyncSender<ClickReplay>> = const { std::cell::OnceCell::new() };
-    static HOOK_POLICY_QUEUE: std::cell::OnceCell<std::sync::mpsc::Sender<PolicyRequest>> = const { std::cell::OnceCell::new() };
     static HOOK_INTERCEPTION_ENABLED: std::cell::RefCell<bool> = const { std::cell::RefCell::new(false) };
     static HOOK_UI_HWND: std::cell::Cell<isize> = const { std::cell::Cell::new(0) };
     static HOOK_LAST_DIRECTION: std::cell::Cell<u8> = const { std::cell::Cell::new(8) };
@@ -437,7 +384,6 @@ fn create_hook_proc(
     event_tx: std::sync::mpsc::Sender<HookEvent>,
     completion_tx: std::sync::mpsc::SyncSender<GestureCompletion>,
     replay_tx: std::sync::mpsc::SyncSender<ClickReplay>,
-    policy_queue: std::sync::mpsc::Sender<PolicyRequest>,
     shared: Arc<HookShared>,
     ui_hwnd: HWND,
 ) -> HOOKPROC {
@@ -449,9 +395,6 @@ fn create_hook_proc(
     });
     HOOK_REPLAY_TX.with(|c| {
         c.set(replay_tx).expect("HOOK_REPLAY_TX");
-    });
-    HOOK_POLICY_QUEUE.with(|c| {
-        c.set(policy_queue).expect("HOOK_POLICY_QUEUE");
     });
     HOOK_INTERCEPTION_ENABLED.with(|c| {
         *c.borrow_mut() = shared.interception_enabled.load(Ordering::Relaxed);
@@ -866,13 +809,6 @@ fn enqueue_replay(replay: ClickReplay) {
     });
 }
 
-/// Policy resolution request — carries the config snapshot so the
-/// policy worker never accesses thread-local state.
-struct PolicyRequest {
-    pid: u32,
-    config: ConfigSnapshot,
-}
-
 /// Resolve a PID to eligibility synchronously in the hook callback.
 /// Called inline when the PID is not yet in the PolicySnapshot cache.
 /// Uses OpenProcess + QueryFullProcessImageNameW + blacklist check.
@@ -906,7 +842,7 @@ fn resolve_pid_sync(pid: u32) -> Eligibility {
             windows::core::PWSTR(buf.as_mut_ptr()),
             &mut len,
         );
-        CloseHandle(handle);
+        let _ = CloseHandle(handle);
         if result.is_err() {
             return Eligibility::Allowed;
         }
@@ -934,22 +870,6 @@ fn resolve_pid_sync(pid: u32) -> Eligibility {
             Eligibility::Allowed
         }
     })
-}
-
-fn enqueue_policy_resolution(pid: u32) {
-    HOOK_POLICY_QUEUE.with(|tx| {
-        if let Some(tx) = tx.get() {
-            // Read config from thread-local to bake into the request
-            HOOK_CONFIG.with(|c| {
-                if let Some(ref cfg) = *c.borrow() {
-                    let _ = tx.send(PolicyRequest {
-                        pid,
-                        config: cfg.clone(),
-                    });
-                }
-            });
-        }
-    });
 }
 
 /// Inject a synthetic right-click at absolute screen coordinates.

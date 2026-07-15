@@ -33,8 +33,10 @@ pub fn launch_executable(path: &str, args: &[String]) -> Result<()> {
     };
 
     let mut cmdline_wide: Vec<u16> = cmdline.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut si = STARTUPINFOW::default();
-    si.cb = std::mem::size_of::<STARTUPINFOW>() as u32;
+    let si = STARTUPINFOW {
+        cb: std::mem::size_of::<STARTUPINFOW>() as u32,
+        ..Default::default()
+    };
     let mut pi = Default::default();
 
     unsafe {
@@ -86,18 +88,18 @@ pub fn shell_open(path: &str) -> Result<()> {
 /// Focus an existing window (best effort).
 pub fn focus_existing(hwnd: HWND) {
     unsafe {
-        ShowWindowAsync(hwnd, SW_RESTORE);
+        let _ = ShowWindowAsync(hwnd, SW_RESTORE);
 
         let _ = SetForegroundWindow(hwnd);
 
         // Flash taskbar as fallback signal
-        let mut fwi = FLASHWINFO {
+        let fwi = FLASHWINFO {
             cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
             hwnd,
             dwFlags: FLASHW_TRAY | FLASHW_TIMERNOFG,
             uCount: 3,
             dwTimeout: 0,
         };
-        FlashWindowEx(&mut fwi);
+        let _ = FlashWindowEx(&fwi);
     }
 }

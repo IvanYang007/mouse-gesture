@@ -53,14 +53,8 @@ struct DaemonState {
 
 fn main() {
     // Check config for debug_logging setting before initializing logger
-    let config_path = std::env::var("APPDATA")
-        .map(|d| {
-            std::path::PathBuf::from(d)
-                .join("mouse-gesture")
-                .join("config.toml")
-        })
-        .unwrap_or_else(|_| std::path::PathBuf::from("config.toml"));
-    let debug_logging = std::fs::read_to_string(&config_path)
+    let cfg_path = config_path();
+    let debug_logging = std::fs::read_to_string(&cfg_path)
         .ok()
         .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
         .and_then(|v| v.get("settings")?.get("debug_logging")?.as_bool())
@@ -186,7 +180,6 @@ fn run() -> Result<()> {
         _hook_handle,
         _recog_handle,
         _replay_handle,
-        _policy_handle,
         _hook_shared,
         hook_ctrl,
         hook_event_rx,
@@ -222,6 +215,7 @@ fn run() -> Result<()> {
     info!("Direction overlay created");
 
     // State
+    #[allow(clippy::arc_with_non_send_sync)]
     let state = Arc::new(Mutex::new(DaemonState {
         config,
         hook_event_rx: Some(hook_event_rx),
@@ -252,7 +246,6 @@ fn run() -> Result<()> {
     // Join hook first — its TLS destructors drop channel senders,
     // unblocking the worker threads' recv() calls.
     let _ = _hook_handle.join();
-    let _ = _policy_handle.join();
     let _ = _replay_handle.join();
     let _ = _recog_handle.join();
     lifecycle::unregister_session_notifications(hwnd);
@@ -341,7 +334,7 @@ fn message_pump(hwnd: HWND) -> i32 {
             if ret.0 == 0 || ret.0 == -1 {
                 return msg.wParam.0 as i32;
             }
-            TranslateMessage(&msg);
+            let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     }
@@ -429,16 +422,16 @@ fn execute_window_action(cmd: &mouse_gesture::config::WindowCommand, target_hwnd
 
     match cmd {
         WindowCommand::Maximize => unsafe {
-            ShowWindowAsync(hwnd, SW_MAXIMIZE);
+            let _ = ShowWindowAsync(hwnd, SW_MAXIMIZE);
         },
         WindowCommand::Minimize => unsafe {
-            ShowWindowAsync(hwnd, SW_MINIMIZE);
+            let _ = ShowWindowAsync(hwnd, SW_MINIMIZE);
         },
         WindowCommand::Restore => unsafe {
-            ShowWindowAsync(hwnd, SW_RESTORE);
+            let _ = ShowWindowAsync(hwnd, SW_RESTORE);
         },
         WindowCommand::Close => unsafe {
-            PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+            let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         },
         WindowCommand::SnapLeft => do_snap(hwnd, monitors.first(), SnapPosition::Left),
         WindowCommand::SnapRight => do_snap(hwnd, monitors.first(), SnapPosition::Right),
@@ -467,7 +460,7 @@ fn do_snap(hwnd: HWND, monitor: Option<&mouse_gesture::window_ops::MonitorInfo>,
     if let Some(m) = monitor {
         let r = snap_rect(m, position);
         unsafe {
-            SetWindowPos(
+            let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOP),
                 r.left,
@@ -529,7 +522,7 @@ unsafe extern "system" fn window_proc(
         }
         WM_QUERYENDSESSION => LRESULT(1),
         msg if msg == lifecycle::WM_WTSSESSION_CHANGE => {
-            let event = wparam.0 as usize;
+            let event = wparam.0;
             if lifecycle::is_session_lock(event) {
                 info!("Session locked — disabling interception");
                 let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Mutex<DaemonState>;
@@ -613,7 +606,7 @@ unsafe extern "system" fn window_proc(
                 };
 
                 if is_tray_msg {
-                    if tray_event == WM_RBUTTONUP as u32 || tray_event == WM_CONTEXTMENU as u32 {
+                    if tray_event == WM_RBUTTONUP || tray_event == WM_CONTEXTMENU {
                         // Mutex released — safe to call show_context_menu (modal loop).
                         match mouse_gesture::tray::show_context_menu(hwnd) {
                             Ok(Some(cmd)) => match cmd {
@@ -635,7 +628,7 @@ unsafe extern "system" fn window_proc(
                                     }
                                 }
                                 TrayCommand::ReloadConfig => {
-                                    PostMessageW(
+                                    let _ = PostMessageW(
                                         Some(hwnd),
                                         WM_APP_RELOAD_CONFIG,
                                         WPARAM::default(),
@@ -652,7 +645,7 @@ unsafe extern "system" fn window_proc(
                                     }
                                 }
                                 TrayCommand::Exit => {
-                                    PostMessageW(
+                                    let _ = PostMessageW(
                                         Some(hwnd),
                                         WM_CLOSE,
                                         WPARAM::default(),
@@ -789,23 +782,20 @@ fn watch_config(path: std::path::PathBuf, owner: isize) {
         .and_then(|m| m.modified().ok());
     loop {
         std::thread::sleep(Duration::from_secs(2));
-        match std::fs::metadata(&path) {
-            Ok(meta) => {
-                let modified = meta.modified().ok();
-                if modified != last_modified {
-                    last_modified = modified;
-                    debug!("Config file changed, posting reload message");
-                    unsafe {
-                        PostMessageW(
-                            Some(hwnd),
-                            WM_APP_RELOAD_CONFIG,
-                            WPARAM::default(),
-                            LPARAM::default(),
-                        );
-                    }
+        if let Ok(meta) = std::fs::metadata(&path) {
+            let modified = meta.modified().ok();
+            if modified != last_modified {
+                last_modified = modified;
+                debug!("Config file changed, posting reload message");
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(hwnd),
+                        WM_APP_RELOAD_CONFIG,
+                        WPARAM::default(),
+                        LPARAM::default(),
+                    );
                 }
             }
-            Err(_) => {} // file removed, keep polling
         }
     }
 }
