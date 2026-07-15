@@ -55,7 +55,7 @@ pub enum HookEvent {
 /// Configuration push from UI thread to hook thread.
 #[derive(Debug, Clone)]
 pub enum HookCommand {
-    UpdateConfig(ConfigSnapshot),
+    UpdateConfig(Arc<ConfigSnapshot>),
     SetInterception(bool),
     ForceReset,
     Shutdown,
@@ -373,7 +373,7 @@ fn process_hook_command(cmd: HookCommand, shared: &HookShared) {
 // ── Thread-local state ─────────────────────────────────────────
 
 thread_local! {
-    static HOOK_CONFIG: std::cell::RefCell<Option<ConfigSnapshot>> = const { std::cell::RefCell::new(None) };
+    static HOOK_CONFIG: std::cell::RefCell<Option<Arc<ConfigSnapshot>>> = const { std::cell::RefCell::new(None) };
     /// Pre-built gesture patterns wrapped in Arc, refreshed on config update.
     /// The hook callback clones this Arc (ref-count bump only) instead of
     /// allocating a new Arc<Vec<PatternDef>> on every gesture completion.
@@ -587,8 +587,6 @@ fn handle_right_down(
             target_pid,
             foreground_hwnd,
             start_point: POINT { x, y },
-            origin_monitor: 0,
-            origin_dpi: 96,
             config_generation: HOOK_CONFIG
                 .with(|c| c.borrow().as_ref().map(|cfg| cfg.generation).unwrap_or(0)),
         })
@@ -752,61 +750,63 @@ fn handle_mouse_move(
         return unsafe { CallNextHookEx(None, code, wparam, lparam) };
     }
 
-    let activated = HOOK_STATE_MACHINE.with(|sm| {
-        let mut sm = sm.borrow_mut();
-        sm.as_mut()
-            .expect("HOOK_STATE_MACHINE not initialized")
-            .on_move(x, y)
-    });
+    // Single TLS access — borrow state machine once for both on_move
+    // and the Drawing check, avoiding a second .with() + RefCell borrow.
+    HOOK_STATE_MACHINE.with(|sm_cell| {
+        let mut sm = sm_cell.borrow_mut();
+        let sm_ref = sm.as_mut().expect("HOOK_STATE_MACHINE not initialized");
 
-    if activated {
-        HOOK_BUFFER.with(|buf| {
-            let mut buf = buf.borrow_mut();
-            if let Some(ref mut b) = *buf {
-                b.add_force(Point { x, y });
-            }
-        });
-        post_event(HookEvent::GestureStarted { x, y, monitor: 0 });
-    }
+        let activated = sm_ref.on_move(x, y);
+        let in_drawing = sm_ref.state == crate::state_machine::State::Drawing;
+        drop(sm); // release RefMut before HOOK_BUFFER access
 
-    let in_drawing = HOOK_STATE_MACHINE.with(|sm| {
-        sm.borrow()
-            .as_ref()
-            .map(|s| s.state == crate::state_machine::State::Drawing)
-            .unwrap_or(false)
-    });
+        if activated {
+            HOOK_BUFFER.with(|buf| {
+                let mut buf = buf.borrow_mut();
+                if let Some(ref mut b) = *buf {
+                    b.add_force(Point { x, y });
+                }
+            });
+            post_event(HookEvent::GestureStarted { x, y, monitor: 0 });
+        }
 
-    if in_drawing {
-        HOOK_BUFFER.with(|buf| {
-            let mut buf = buf.borrow_mut();
-            if let Some(ref mut buf) = *buf {
-                buf.add_point(Point { x, y });
-                if let Some((from, to)) = buf.last_two() {
-                    let dir = direction_from_points(from, to);
-                    let dir_idx = match dir {
-                        Direction::N => 0,
-                        Direction::NE => 1,
-                        Direction::E => 2,
-                        Direction::SE => 3,
-                        Direction::S => 4,
-                        Direction::SW => 5,
-                        Direction::W => 6,
-                        Direction::NW => 7,
-                    };
-                    let prev = HOOK_LAST_DIRECTION.with(|c| c.replace(dir_idx));
-                    if prev != dir_idx {
-                        post_event(HookEvent::DirectionChanged {
-                            direction: dir,
-                            x,
-                            y,
-                        });
+        if in_drawing {
+            HOOK_BUFFER.with(|buf| {
+                let mut buf = buf.borrow_mut();
+                if let Some(ref mut buf) = *buf {
+                    let old_len = buf.len();
+                    buf.add_point(Point { x, y });
+                    // Only compute direction if the point was actually stored
+                    // (not coalesced). Coalesced points produce the same direction.
+                    if buf.len() > old_len {
+                        if let Some((from, to)) = buf.last_two() {
+                            let dir = direction_from_points(from, to);
+                            let dir_idx = match dir {
+                                Direction::N => 0,
+                                Direction::NE => 1,
+                                Direction::E => 2,
+                                Direction::SE => 3,
+                                Direction::S => 4,
+                                Direction::SW => 5,
+                                Direction::W => 6,
+                                Direction::NW => 7,
+                            };
+                            let prev = HOOK_LAST_DIRECTION.with(|c| c.replace(dir_idx));
+                            if prev != dir_idx {
+                                post_event(HookEvent::DirectionChanged {
+                                    direction: dir,
+                                    x,
+                                    y,
+                                });
+                            }
+                        }
                     }
                 }
-            }
-        });
-    }
+            });
+        }
 
-    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    })
 }
 
 // ── Completion and replay enqueue ──────────────────────────────
@@ -863,29 +863,40 @@ fn resolve_pid_sync(pid: u32) -> Eligibility {
     };
 
     let basename = unsafe {
-        // Allocate a generous buffer upfront — the two-call pattern
-        // (null → len → resize) is unreliable for QueryFullProcessImageNameW
-        // because the first call with a null buffer does not update len.
+        // Try stack buffer first — avoids heap allocation in the hook callback
+        // for the common case (path < 512 WCHARs). Only allocates if the path
+        // is too long or the first call fails and needs a bigger buffer.
         let mut len: u32 = 512;
-        let mut buf: Vec<u16> = vec![0u16; len as usize];
-        let result = QueryFullProcessImageNameW(
-            handle,
-            PROCESS_NAME_FORMAT(0),
-            windows::core::PWSTR(buf.as_mut_ptr()),
-            &mut len,
-        );
-        // If 512 chars wasn't enough (unlikely), len now holds the required
-        // size — resize and retry once.
-        let result = if result.is_err() {
-            buf.resize(len as usize, 0);
-            QueryFullProcessImageNameW(
+        let (result, buf) = {
+            let mut stack: [u16; 512] = [0u16; 512];
+            let result = QueryFullProcessImageNameW(
                 handle,
                 PROCESS_NAME_FORMAT(0),
-                windows::core::PWSTR(buf.as_mut_ptr()),
+                windows::core::PWSTR(stack.as_mut_ptr()),
                 &mut len,
-            )
-        } else {
-            result
+            );
+            if result.is_err() && len as usize > stack.len() {
+                // Rare: path exceeds 512 chars — fall back to heap
+                let mut heap = vec![0u16; len as usize];
+                let result = QueryFullProcessImageNameW(
+                    handle,
+                    PROCESS_NAME_FORMAT(0),
+                    windows::core::PWSTR(heap.as_mut_ptr()),
+                    &mut len,
+                );
+                (result, heap)
+            } else if result.is_err() {
+                // Retry with stack (size already in len)
+                let result = QueryFullProcessImageNameW(
+                    handle,
+                    PROCESS_NAME_FORMAT(0),
+                    windows::core::PWSTR(stack.as_mut_ptr()),
+                    &mut len,
+                );
+                (result, stack.to_vec())
+            } else {
+                (result, stack.to_vec())
+            }
         };
         let _ = CloseHandle(handle);
         if result.is_err() {

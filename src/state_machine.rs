@@ -29,8 +29,6 @@ pub struct GestureContext {
     pub target_pid: u32,
     pub foreground_hwnd: HWND,
     pub start_point: POINT,
-    pub origin_monitor: isize,
-    pub origin_dpi: u32,
     pub config_generation: u64,
 }
 
@@ -204,8 +202,6 @@ mod tests {
             target_pid: 1234,
             foreground_hwnd: HWND(std::ptr::null_mut()),
             start_point: POINT { x: 100, y: 100 },
-            origin_monitor: 0,
-            origin_dpi: 96,
             config_generation: 1,
         }
     }

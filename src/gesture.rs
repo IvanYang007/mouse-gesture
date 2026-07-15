@@ -22,25 +22,38 @@ pub struct Point {
 
 /// Classify the 8-direction label from two consecutive points.
 /// Screen coordinates: Y increases downward, so -dy = upward motion.
+/// Uses integer slope comparisons — no f64, no atan2.
 pub fn direction_from_points(from: Point, to: Point) -> Direction {
-    let dx = (to.x - from.x) as f64;
-    let dy = (to.y - from.y) as f64;
-    let angle = (-dy).atan2(dx);
-    let angle = if angle < 0.0 {
-        angle + std::f64::consts::TAU
+    let dx = to.x - from.x;
+    let dy = -(to.y - from.y); // negate: screen Y is inverted for angle math
+
+    let abs_dx = dx.unsigned_abs();
+    let abs_dy = dy.unsigned_abs();
+
+    // tan(22.5°) ≈ 0.4142  → threshold: abs_dx * 241 > abs_dy * 100  means near-horizontal
+    // tan(67.5°) ≈ 2.4142  → threshold: abs_dy * 241 > abs_dx * 100  means near-vertical
+    let near_horiz = abs_dx * 241 > abs_dy * 100; // |dx/dy| > ~2.41 → cardinal E/W
+    let near_vert = abs_dy * 241 > abs_dx * 100; // |dy/dx| > ~2.41 → cardinal N/S
+
+    if near_horiz {
+        if dx > 0 {
+            Direction::E
+        } else {
+            Direction::W
+        }
+    } else if near_vert {
+        if dy > 0 {
+            Direction::N
+        } else {
+            Direction::S
+        }
     } else {
-        angle
-    };
-    let sector = ((angle + std::f64::consts::PI / 8.0) / (std::f64::consts::PI / 4.0)) as u8;
-    match sector % 8 {
-        0 => Direction::E,
-        1 => Direction::NE,
-        2 => Direction::N,
-        3 => Direction::NW,
-        4 => Direction::W,
-        5 => Direction::SW,
-        6 => Direction::S,
-        _ => Direction::SE,
+        match (dx > 0, dy > 0) {
+            (true, true) => Direction::NE,
+            (true, false) => Direction::SE,
+            (false, true) => Direction::NW,
+            (false, false) => Direction::SW,
+        }
     }
 }
 

@@ -54,8 +54,6 @@ fn dummy_ctx() -> GestureContext {
         target_pid: 1234,
         foreground_hwnd: windows::Win32::Foundation::HWND(std::ptr::null_mut()),
         start_point: windows::Win32::Foundation::POINT { x: 100, y: 100 },
-        origin_monitor: 0,
-        origin_dpi: 96,
         config_generation: 1,
     }
 }

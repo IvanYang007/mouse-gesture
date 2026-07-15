@@ -45,7 +45,7 @@ enum ActionJob {
 }
 
 struct DaemonState {
-    config: Option<ConfigSnapshot>,
+    config: Option<Arc<ConfigSnapshot>>,
     hook_event_rx: Option<std::sync::mpsc::Receiver<HookEvent>>,
     worker_tx: Option<std::sync::mpsc::Sender<ActionJob>>,
     tray: Option<TrayIcon>,
@@ -254,7 +254,9 @@ fn run() -> Result<()> {
     }
 
     if let Some(ref cfg) = config {
-        hook_ctrl.send(HookCommand::UpdateConfig(cfg.clone())).ok();
+        hook_ctrl
+            .send(HookCommand::UpdateConfig(Arc::new(cfg.clone())))
+            .ok();
         hook_ctrl.send(HookCommand::SetInterception(true)).ok();
         mouse_gesture::autostart::sync(cfg.start_with_windows);
         info!("Config loaded: {} gestures active", cfg.gestures.len());
@@ -282,7 +284,7 @@ fn run() -> Result<()> {
     // that's irrelevant here.
     #[allow(clippy::arc_with_non_send_sync)]
     let state = Arc::new(Mutex::new(DaemonState {
-        config,
+        config: config.map(Arc::new),
         hook_event_rx: Some(hook_event_rx),
         worker_tx: Some(worker_tx),
         tray: Some(tray),
@@ -371,7 +373,10 @@ fn message_pump(hwnd: HWND) -> i32 {
                         pending_events.push(event);
                     }
                 }
-                (guard.worker_tx.clone(), guard.config.clone())
+                (
+                    guard.worker_tx.clone(),
+                    guard.config.as_ref().map(Arc::clone),
+                )
             } else {
                 (None, None)
             };
@@ -408,7 +413,7 @@ fn message_pump(hwnd: HWND) -> i32 {
 fn dispatch_hook_event(
     event: &HookEvent,
     worker_tx: &Option<std::sync::mpsc::Sender<ActionJob>>,
-    config: &Option<ConfigSnapshot>,
+    config: &Option<Arc<ConfigSnapshot>>,
 ) {
     match event {
         HookEvent::GestureEnded {
@@ -800,11 +805,11 @@ fn reload_config(hwnd: HWND) {
                 );
                 // Update hook
                 if let Some(ref ctrl) = guard.hook_ctrl {
-                    let _ = ctrl.send(HookCommand::UpdateConfig(snapshot.clone()));
+                    let _ = ctrl.send(HookCommand::UpdateConfig(Arc::new(snapshot.clone())));
                     let _ = ctrl.send(HookCommand::SetInterception(true));
                 }
                 // Update state
-                guard.config = Some(snapshot);
+                guard.config = Some(Arc::new(snapshot));
                 // Update tray
                 if let Some(ref tray) = guard.tray {
                     let _ = tray.update_status(&TrayState::Active { gesture_count });
