@@ -51,6 +51,71 @@ struct DaemonState {
     overlay: OverlayWindow,
 }
 
+// ── File Logger ────────────────────────────────────────────────
+
+/// Minimal file logger replacing env_logger. Writes timestamped
+/// entries to the daemon log file. No regex/RUST_LOG dependency.
+struct FileLogger {
+    file: std::sync::Mutex<std::io::LineWriter<std::fs::File>>,
+    level: log::LevelFilter,
+}
+
+impl FileLogger {
+    fn new(file: std::fs::File, level: &str) -> Self {
+        let level = match level {
+            "debug" => log::LevelFilter::Debug,
+            "info" => log::LevelFilter::Info,
+            _ => log::LevelFilter::Warn,
+        };
+        FileLogger {
+            file: std::sync::Mutex::new(std::io::LineWriter::new(file)),
+            level,
+        }
+    }
+}
+
+impl log::Log for FileLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= self.level
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        use std::io::Write;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        let _ = writeln!(
+            self.file.lock().unwrap(),
+            "{} [{:>5}] {}: {}",
+            format_rfc3339_millis(now),
+            record.level(),
+            record.target(),
+            record.args(),
+        );
+    }
+
+    fn flush(&self) {
+        use std::io::Write;
+        let _ = self.file.lock().unwrap().flush();
+    }
+}
+
+/// Format a Duration as RFC 3339 with milliseconds (no external crate).
+fn format_rfc3339_millis(dur: std::time::Duration) -> String {
+    let secs = dur.as_secs();
+    let ms = dur.subsec_millis();
+    // days since UNIX epoch
+    let days = secs / 86400;
+    let time_secs = secs % 86400;
+    let h = time_secs / 3600;
+    let m = (time_secs % 3600) / 60;
+    let s = time_secs % 60;
+    format!("{days}.{h:02}:{m:02}:{s:02}.{ms:03}")
+}
+
 fn main() {
     // Check config for debug_logging setting before initializing logger
     let cfg_path = config_path();
@@ -85,12 +150,12 @@ fn main() {
         .open(&log_path)
         .unwrap();
 
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(log_level))
-        .format_timestamp_millis()
-        .target(env_logger::Target::Pipe(Box::new(
-            std::io::LineWriter::new(log_file),
-        )))
-        .init();
+    // Thin custom logger — avoids pulling in the regex stack (~600 KiB)
+    // that env_logger brings for RUST_LOG filtering we never use.
+    let file_logger = FileLogger::new(log_file, log_level);
+    log::set_boxed_logger(Box::new(file_logger))
+        .map(|()| log::set_max_level(log::LevelFilter::max()))
+        .expect("logger init");
 
     info!(
         "Mouse Gesture Daemon v{} starting (Phase 2)",
