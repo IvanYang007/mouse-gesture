@@ -90,7 +90,7 @@ impl log::Log for FileLogger {
         let _ = writeln!(
             self.file.lock().unwrap(),
             "{} [{:>5}] {}: {}",
-            format_rfc3339_millis(now),
+            format_log_timestamp(now),
             record.level(),
             record.target(),
             record.args(),
@@ -103,8 +103,8 @@ impl log::Log for FileLogger {
     }
 }
 
-/// Format a Duration as RFC 3339 with milliseconds (no external crate).
-fn format_rfc3339_millis(dur: std::time::Duration) -> String {
+/// Format a Duration since UNIX epoch as a compact log timestamp.
+fn format_log_timestamp(dur: std::time::Duration) -> String {
     let secs = dur.as_secs();
     let ms = dur.subsec_millis();
     // days since UNIX epoch
