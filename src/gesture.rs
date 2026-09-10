@@ -57,6 +57,13 @@ pub fn direction_from_points(from: Point, to: Point) -> Direction {
     }
 }
 
+/// One direction run: a direction plus the total path length it covers.
+#[derive(Debug, Clone, Copy)]
+struct DirectionRun {
+    dir: Direction,
+    len: f64,
+}
+
 /// Result of gesture classification.
 #[derive(Debug, Clone)]
 pub enum GestureResult {
@@ -206,6 +213,7 @@ pub fn classify(
     patterns: &[(String, Vec<Direction>)],
     rdp_epsilon_sq: f64,
     min_gesture_length: u32,
+    tolerance_physical: f64,
 ) -> GestureResult {
     if buffer.len() < 2 {
         return GestureResult::TooShort;
@@ -219,34 +227,106 @@ pub fn classify(
         return GestureResult::TooShort;
     }
 
-    // Step 2: Direction quantization with angular hysteresis
-    let directions = quantize_directions(&simplified);
-    if directions.is_empty() {
+    // Step 2: Direction quantization (runs carry their path length)
+    let mut runs = quantize_runs(&simplified);
+    if runs.is_empty() {
         return GestureResult::TooShort;
     }
+    runs.truncate(MAX_ENCODED_TOKENS);
+    let collapsed: Vec<Direction> = runs.iter().map(|r| r.dir).collect();
 
-    // Step 3: Collapse consecutive identical directions
-    let collapsed = collapse_directions(&directions);
-
-    // Step 4: Minimum gesture length check
+    // Step 3: Minimum gesture length check
     if (collapsed.len() as u32) < min_gesture_length {
         return GestureResult::TooShort;
     }
 
-    // Step 5: Exact match against configured patterns
-    for (name, pattern) in patterns {
-        if pattern.len() != collapsed.len() {
-            continue;
-        }
-        if pattern == &collapsed {
-            return GestureResult::Matched {
-                name: name.clone(),
-                directions: collapsed,
-            };
+    // Step 4: Exact match against configured patterns
+    if let Some((name, _)) = exact_match(&collapsed, patterns) {
+        return GestureResult::Matched {
+            name: name.clone(),
+            directions: collapsed,
+        };
+    }
+
+    // Step 5: Tolerance fallback — drop short direction runs (wobble,
+    // rounded corners, release flicks) and retry, least destructive first.
+    if tolerance_physical > 0.0 {
+        if let Some((name, directions)) = match_tolerant(&runs, patterns, tolerance_physical) {
+            return GestureResult::Matched { name, directions };
         }
     }
 
     GestureResult::NoMatch
+}
+
+/// Exact pattern lookup on a direction sequence.
+fn exact_match<'a>(
+    dirs: &[Direction],
+    patterns: &'a [(String, Vec<Direction>)],
+) -> Option<&'a (String, Vec<Direction>)> {
+    patterns.iter().find(|(_, p)| p.as_slice() == dirs)
+}
+
+/// Retry matching while dropping the shortest run below its tolerance.
+/// One run is dropped per round and the shortest is always dropped first, so
+/// the least destructive interpretation of the drawing wins. A run is only
+/// eligible when it is shorter than `tolerance_physical` or much shorter than
+/// both of its neighbours — deliberate strokes stay intact.
+fn match_tolerant(
+    runs: &[DirectionRun],
+    patterns: &[(String, Vec<Direction>)],
+    tolerance_physical: f64,
+) -> Option<(String, Vec<Direction>)> {
+    let mut work = runs.to_vec();
+
+    loop {
+        let dirs: Vec<Direction> = work.iter().map(|r| r.dir).collect();
+        if let Some((name, _)) = exact_match(&dirs, patterns) {
+            return Some((name.clone(), dirs));
+        }
+        if work.len() <= 1 {
+            return None;
+        }
+
+        // Shortest eligible run, if any.
+        let mut victim: Option<usize> = None;
+        let mut shortest = f64::MAX;
+        for i in 0..work.len() {
+            let len = work[i].len;
+            if len < run_tolerance(&work, i, tolerance_physical) && len < shortest {
+                shortest = len;
+                victim = Some(i);
+            }
+        }
+        let i = victim?;
+        work.remove(i);
+
+        // Neighbours that are now adjacent and equal merge back together.
+        if i > 0 && i < work.len() && work[i - 1].dir == work[i].dir {
+            work[i - 1].len += work[i].len;
+            work.remove(i);
+        }
+    }
+}
+
+/// A run may be dropped when it is shorter than the absolute tolerance, or when
+/// it is shorter than 40% of its shorter neighbour — a rounded corner or a
+/// release flick is short next to the strokes it connects. Heuristic constant;
+/// tune `tolerance_dip` in config rather than this ratio.
+fn run_tolerance(work: &[DirectionRun], i: usize, tolerance_physical: f64) -> f64 {
+    const NEIGHBOR_FRACTION: f64 = 0.4;
+
+    let mut min_neighbor = f64::MAX;
+    if i > 0 {
+        min_neighbor = min_neighbor.min(work[i - 1].len);
+    }
+    if i + 1 < work.len() {
+        min_neighbor = min_neighbor.min(work[i + 1].len);
+    }
+    if min_neighbor == f64::MAX {
+        return tolerance_physical;
+    }
+    tolerance_physical.max(NEIGHBOR_FRACTION * min_neighbor)
 }
 
 // ── RDP Simplification ─────────────────────────────────────────
@@ -364,12 +444,14 @@ fn perpendicular_dist_sq(p: Point, a: Point, b: Point, line_len_sq: f64) -> f64 
 
 /// Quantize consecutive point pairs into 8 discrete directions.
 /// Angular hysteresis: ±11.25° dead zones at boundaries.
-fn quantize_directions(points: &[Point]) -> Vec<Direction> {
+/// Consecutive segments in the same direction merge into one run and
+/// accumulate their path length.
+fn quantize_runs(points: &[Point]) -> Vec<DirectionRun> {
     if points.len() < 2 {
         return Vec::new();
     }
 
-    let mut dirs = Vec::with_capacity(points.len() - 1);
+    let mut runs: Vec<DirectionRun> = Vec::with_capacity(points.len() - 1);
 
     for window in points.windows(2) {
         let dx = (window[1].x - window[0].x) as f64;
@@ -380,12 +462,20 @@ fn quantize_directions(points: &[Point]) -> Vec<Direction> {
             continue;
         }
 
-        let angle = (-dy).atan2(dx).to_degrees();
-        let dir = angle_to_direction(angle);
-        dirs.push(dir);
+        let dir = angle_to_direction((-dy).atan2(dx).to_degrees());
+        let len = (dx * dx + dy * dy).sqrt();
+
+        match runs.last_mut() {
+            Some(last) if last.dir == dir => last.len += len,
+            _ => runs.push(DirectionRun { dir, len }),
+        }
     }
 
-    dirs
+    runs
+}
+
+fn quantize_directions(points: &[Point]) -> Vec<Direction> {
+    quantize_runs(points).into_iter().map(|r| r.dir).collect()
 }
 
 /// Map an angle in degrees (-180..180) to the nearest 8-way direction.
@@ -459,7 +549,7 @@ mod tests {
             buf.add_point(Point { x, y: 50 });
         }
         let patterns = vec![("test".into(), vec![Direction::E])];
-        let result = classify(&buf, &patterns, 4.0, 1);
+        let result = classify(&buf, &patterns, 4.0, 1, 0.0);
         match result {
             GestureResult::Matched { name, .. } => assert_eq!(name, "test"),
             _ => panic!("expected match"),
@@ -478,7 +568,7 @@ mod tests {
             buf.add_point(Point { x: 50, y });
         }
         let patterns = vec![("test".into(), vec![Direction::E, Direction::S])];
-        let result = classify(&buf, &patterns, 4.0, 2);
+        let result = classify(&buf, &patterns, 4.0, 2, 0.0);
         match result {
             GestureResult::Matched { name, .. } => assert_eq!(name, "test"),
             _ => panic!("expected match: {:?}", result),
@@ -492,7 +582,7 @@ mod tests {
             buf.add_point(Point { x, y: 20 });
         }
         let patterns: Vec<(String, Vec<Direction>)> = vec![("down".into(), vec![Direction::S])];
-        let result = classify(&buf, &patterns, 4.0, 1);
+        let result = classify(&buf, &patterns, 4.0, 1, 0.0);
         match result {
             GestureResult::NoMatch => {}
             _ => panic!("expected NoMatch"),
@@ -505,7 +595,7 @@ mod tests {
         buf.add_point(Point { x: 0, y: 0 });
         buf.add_point(Point { x: 5, y: 0 });
         let patterns: Vec<(String, Vec<Direction>)> = vec![];
-        let result = classify(&buf, &patterns, 4.0, 3); // min 3 tokens
+        let result = classify(&buf, &patterns, 4.0, 3, 0.0); // min 3 tokens
         match result {
             GestureResult::TooShort => {}
             _ => panic!("expected TooShort"),
@@ -630,13 +720,101 @@ mod tests {
                 buf.add_point(Point { x: *x, y: *y });
             }
             let patterns: Vec<(String, Vec<Direction>)> = vec![];
-            let _result = classify(&buf, &patterns, 4.0, 2);
+            let _result = classify(&buf, &patterns, 4.0, 2, 0.0);
             // The test passes if we don't panic
         }
     }
 
-    // ── add_force tests ──────────────────────────────────────────
+    // ── tolerance tests ──────────────────────────────────────────
 
+    /// Append a straight line of points from `from` to `to`.
+    fn add_line(buf: &mut GestureBuffer, from: Point, to: Point) {
+        let steps = 20;
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            buf.add_point(Point {
+                x: (from.x as f64 + (to.x - from.x) as f64 * t).round() as i32,
+                y: (from.y as f64 + (to.y - from.y) as f64 * t).round() as i32,
+            });
+        }
+    }
+
+    #[test]
+    fn rounded_corner_matches_with_tolerance() {
+        // N then a 28px diagonal corner then E: raw [N, NE, E].
+        let mut buf = GestureBuffer::new(2);
+        add_line(&mut buf, Point { x: 50, y: 150 }, Point { x: 50, y: 50 });
+        add_line(&mut buf, Point { x: 50, y: 50 }, Point { x: 70, y: 30 });
+        add_line(&mut buf, Point { x: 70, y: 30 }, Point { x: 180, y: 30 });
+
+        let patterns = vec![("maximize".into(), vec![Direction::N, Direction::E])];
+
+        // Strict: the corner run blocks the match.
+        match classify(&buf, &patterns, 4.0, 2, 0.0) {
+            GestureResult::NoMatch => {}
+            other => panic!("expected NoMatch without tolerance, got {:?}", other),
+        }
+
+        // Tolerant: the short NE corner run is dropped.
+        match classify(&buf, &patterns, 4.0, 2, 15.0) {
+            GestureResult::Matched { name, directions } => {
+                assert_eq!(name, "maximize");
+                assert_eq!(directions, vec![Direction::N, Direction::E]);
+            }
+            other => panic!("expected Matched with tolerance, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn wobble_spike_is_absorbed() {
+        // E with an up/down spike mid-stroke: [E, NE, SE, E].
+        let mut buf = GestureBuffer::new(2);
+        add_line(&mut buf, Point { x: 0, y: 50 }, Point { x: 40, y: 50 });
+        add_line(&mut buf, Point { x: 40, y: 50 }, Point { x: 48, y: 38 });
+        add_line(&mut buf, Point { x: 48, y: 38 }, Point { x: 56, y: 50 });
+        add_line(&mut buf, Point { x: 56, y: 50 }, Point { x: 150, y: 50 });
+
+        let patterns = vec![("forward".into(), vec![Direction::E])];
+        match classify(&buf, &patterns, 4.0, 1, 20.0) {
+            GestureResult::Matched { name, .. } => assert_eq!(name, "forward"),
+            other => panic!("expected Matched, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn long_reversal_is_not_swallowed() {
+        // N then S with long strokes must not collapse to [N].
+        let mut buf = GestureBuffer::new(2);
+        add_line(&mut buf, Point { x: 50, y: 150 }, Point { x: 50, y: 50 });
+        add_line(&mut buf, Point { x: 50, y: 50 }, Point { x: 50, y: 160 });
+
+        let patterns = vec![("up".into(), vec![Direction::N])];
+        match classify(&buf, &patterns, 4.0, 1, 30.0) {
+            GestureResult::NoMatch => {}
+            other => panic!("expected NoMatch, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn tolerance_keeps_least_destructive_match() {
+        // [W, SW, S] with a short SW corner. Both "W S" and "W" are configured;
+        // the corner is dropped first, so "W S" wins over "W".
+        let mut buf = GestureBuffer::new(2);
+        add_line(&mut buf, Point { x: 150, y: 50 }, Point { x: 50, y: 50 });
+        add_line(&mut buf, Point { x: 50, y: 50 }, Point { x: 30, y: 70 });
+        add_line(&mut buf, Point { x: 30, y: 70 }, Point { x: 30, y: 170 });
+
+        let patterns = vec![
+            ("snap_bottom".into(), vec![Direction::W, Direction::S]),
+            ("go_back".into(), vec![Direction::W]),
+        ];
+        match classify(&buf, &patterns, 4.0, 1, 30.0) {
+            GestureResult::Matched { name, .. } => assert_eq!(name, "snap_bottom"),
+            other => panic!("expected Matched(snap_bottom), got {:?}", other),
+        }
+    }
+
+    // ── add_force tests ──────────────────────────────────────────
     #[test]
     fn add_force_bypasses_spatial_coalescing() {
         let mut buf = GestureBuffer::new(10);

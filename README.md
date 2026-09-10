@@ -52,6 +52,7 @@ activation_threshold_dip = 3.0     # pixels before activation (default 3)
 sample_distance_dip = 2.0          # min distance between sampled points
 rdp_epsilon_dip = 2.0              # RDP simplification tolerance
 min_gesture_length = 2             # min direction tokens after collapse
+tolerance_dip = 15.0               # ignore direction runs shorter than this (sloppy drawing)
 debug_logging = false              # set true for verbose daemon.log
 start_with_windows = false         # auto-start via registry
 ```
@@ -62,6 +63,7 @@ start_with_windows = false         # auto-start via registry
 | `sample_distance_dip` | 2.0 | Minimum pixels between stored points — thins raw mouse data |
 | `rdp_epsilon_dip` | 2.0 | Maximum deviation from a straight line before RDP keeps a point as a corner |
 | `min_gesture_length` | 2 | Minimum direction tokens after collapse — 1 allows single strokes, 2 requires a turn |
+| `tolerance_dip` | 15.0 | Extra forgiveness. When a drawing does not match exactly, direction runs shorter than this are dropped one at a time (shortest first) and matching is retried. Handles rounded corners, wobble, and release flicks. Raise to 25–40 for very sloppy drawing. 0 disables it. |
 | `debug_logging` | false | Writes verbose output to `daemon.log` when true |
 | `start_with_windows` | false | Registers the daemon in `HKCU\...\Run` for login auto-start |
 
@@ -72,6 +74,7 @@ activation threshold  →  gates whether gesture starts
 sample distance       →  thins raw mouse-move events
 RDP epsilon           →  removes wobble, keeps corners
 direction quantize    →  converts points to 8-way (U/D/L/R/UR/DR/DL/UL)
+tolerance             →  drops short noise runs, retries match (exact match always wins)
 collapse              →  merges consecutive duplicates: [E,E,S,S] → [E,S]
 min gesture length    →  rejects gestures with too few tokens
 exact match           →  compares against configured patterns

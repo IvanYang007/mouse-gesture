@@ -41,6 +41,7 @@ action = { type = "key", combo = ["Ctrl", "W"] }
         &snapshot.gestures,
         snapshot.rdp_epsilon_sq,
         snapshot.min_gesture_length,
+        snapshot.tolerance_physical,
     );
     match result {
         GestureResult::Matched { name, .. } => assert_eq!(name, "maximize"),

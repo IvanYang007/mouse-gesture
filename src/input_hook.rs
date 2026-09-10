@@ -86,6 +86,7 @@ struct GestureCompletion {
     patterns: Arc<Vec<PatternDef>>,
     rdp_epsilon_sq: f64,
     min_gesture_length: u32,
+    tolerance_physical: f64,
 }
 
 /// Shared state between hook thread and main thread.
@@ -251,6 +252,7 @@ pub fn spawn_hook_thread(
                         &completion.patterns,
                         completion.rdp_epsilon_sq,
                         completion.min_gesture_length,
+                        completion.tolerance_physical,
                     )
                 };
 
@@ -696,12 +698,16 @@ fn handle_right_up(
                     .unwrap_or(0)
             });
 
-            // Snapshot rdp_epsilon and min_gesture_length from config.
+            // Snapshot rdp_epsilon, min_gesture_length and tolerance from config.
             // Patterns come from HOOK_PATTERNS (pre-built Arc, ref-count bump only).
-            let (rdp_epsilon_sq, min_gesture_length) = HOOK_CONFIG.with(|c| {
+            let (rdp_epsilon_sq, min_gesture_length, tolerance_physical) = HOOK_CONFIG.with(|c| {
                 let cfg = c.borrow();
                 let cfg = cfg.as_ref().expect("HOOK_CONFIG not initialized");
-                (cfg.rdp_epsilon_sq, cfg.min_gesture_length)
+                (
+                    cfg.rdp_epsilon_sq,
+                    cfg.min_gesture_length,
+                    cfg.tolerance_physical,
+                )
             });
             let patterns = HOOK_PATTERNS.with(|c| {
                 c.borrow()
@@ -728,6 +734,7 @@ fn handle_right_up(
                         patterns,
                         rdp_epsilon_sq,
                         min_gesture_length,
+                        tolerance_physical,
                     });
                 }
             });

@@ -31,6 +31,10 @@ pub struct Settings {
     pub rdp_epsilon_dip: f64,
     #[serde(default = "default_min_gesture_length")]
     pub min_gesture_length: u32,
+    /// Direction runs shorter than this (in DIP) are treated as noise and
+    /// dropped when an exact match fails. Higher = more forgiving.
+    #[serde(default = "default_tolerance")]
+    pub tolerance_dip: f64,
     #[serde(default)]
     pub debug_logging: bool,
     #[serde(default)]
@@ -154,6 +158,7 @@ pub struct ConfigSnapshot {
     pub sample_distance_physical: i32,
     pub rdp_epsilon_sq: f64,
     pub min_gesture_length: u32,
+    pub tolerance_physical: f64,
     pub blacklist_mode: BlacklistMode,
     pub blacklist_apps: HashSet<String>,
     /// Compiled gesture patterns: Vec<(name, sequence)>
@@ -228,6 +233,7 @@ impl ConfigFile {
             (self.settings.sample_distance_dip * dpi as f64 / 96.0) as i32;
         let rdp_epsilon_physical = self.settings.rdp_epsilon_dip * dpi as f64 / 96.0;
         let rdp_epsilon_sq = rdp_epsilon_physical * rdp_epsilon_physical;
+        let tolerance_physical = self.settings.tolerance_dip * dpi as f64 / 96.0;
 
         // Compile gestures
         let mut gestures = Vec::with_capacity(self.gestures.len());
@@ -290,6 +296,7 @@ impl ConfigFile {
             sample_distance_physical,
             rdp_epsilon_sq,
             min_gesture_length: self.settings.min_gesture_length,
+            tolerance_physical,
             blacklist_mode: self.blacklist.mode.clone(),
             blacklist_apps,
             gestures,
@@ -319,6 +326,7 @@ impl Default for Settings {
             sample_distance_dip: default_sample_distance(),
             rdp_epsilon_dip: default_rdp_epsilon(),
             min_gesture_length: default_min_gesture_length(),
+            tolerance_dip: default_tolerance(),
             debug_logging: false,
             start_with_windows: false,
         }
@@ -336,6 +344,9 @@ fn default_rdp_epsilon() -> f64 {
 }
 fn default_min_gesture_length() -> u32 {
     2
+}
+fn default_tolerance() -> f64 {
+    15.0
 }
 
 // ── Keyboard Shortcut Compilation ──────────────────────────────

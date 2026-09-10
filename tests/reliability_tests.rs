@@ -46,7 +46,7 @@ fn gesture_buffer_resets_correctly() {
 fn classify_handles_empty_buffer() {
     let buf = GestureBuffer::new(2);
     let patterns = vec![];
-    let result = classify(&buf, &patterns, 4.0, 2);
+    let result = classify(&buf, &patterns, 4.0, 2, 0.0);
     match result {
         GestureResult::TooShort => {}
         _ => panic!("expected TooShort for empty buffer"),
@@ -199,7 +199,7 @@ fn classify_consistently_recognizes_pattern() {
 
     let patterns = vec![("test".into(), vec![Direction::E, Direction::S])];
     for _ in 0..100 {
-        let result = classify(&buf, &patterns, 4.0, 2);
+        let result = classify(&buf, &patterns, 4.0, 2, 0.0);
         match result {
             GestureResult::Matched { name, .. } => assert_eq!(name, "test"),
             other => panic!("expected match on iteration, got {:?}", other),
